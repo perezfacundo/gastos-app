@@ -1,0 +1,1289 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Control de Gastos</title>
+  <meta name="description" content="Aplicación de control de gastos personales con almacenamiento local." />
+
+  <!--
+    Aplica el tema (claro/oscuro) ANTES de pintar la página para evitar el
+    "parpadeo" de colores. Respeta la preferencia guardada o, si no existe,
+    la del sistema operativo.
+  -->
+  <script>
+    (function () {
+      var saved = null;
+      try { saved = localStorage.getItem('gastos-app:theme'); } catch (e) { /* almacenamiento bloqueado */ }
+      var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      var isDark = saved ? saved === 'dark' : prefersDark;
+      if (isDark) document.documentElement.classList.add('dark');
+    })();
+  </script>
+
+  <!-- Tailwind CSS (Play CDN) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['system-ui', '-apple-system', '"Segoe UI"', 'Roboto', 'sans-serif'],
+          },
+        },
+      },
+    };
+  </script>
+
+  <!-- Chart.js (versión fija) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+  <style>
+    /* ------------------------------------------------------------------
+       Tokens de color. Única fuente de verdad: el gráfico (Chart.js)
+       los lee con getComputedStyle, así claro/oscuro cambian en un lugar.
+       Cada categoría tiene un color FIJO (el color sigue a la categoría,
+       no a su posición en el ranking).
+       ------------------------------------------------------------------ */
+    :root {
+      --surface: #ffffff;
+      --text-primary: #0b0b0b;
+      --text-secondary: #52514e;
+      --tooltip-border: rgba(11, 11, 11, 0.10);
+
+      --cat-alimentacion: #2a78d6; /* azul */
+      --cat-transporte:   #eb6834; /* naranja */
+      --cat-vivienda:     #1baf7a; /* aqua */
+      --cat-ocio:         #eda100; /* amarillo */
+      --cat-servicios:    #e87ba4; /* magenta */
+      --cat-salud:        #008300; /* verde */
+      --cat-sueldo:       #6250d6; /* violeta */
+      --cat-otros:        #e34948; /* rojo */
+    }
+
+    html.dark {
+      --surface: #171717;
+      --text-primary: #f0efec;
+      --text-secondary: #c3c2b7;
+      --tooltip-border: rgba(255, 255, 255, 0.12);
+
+      --cat-alimentacion: #3987e5;
+      --cat-transporte:   #d95926;
+      --cat-vivienda:     #199e70;
+      --cat-ocio:         #c98500;
+      --cat-servicios:    #d55181;
+      --cat-salud:        #008300;
+      --cat-sueldo:       #9085e9;
+      --cat-otros:        #e66767;
+    }
+
+    html { color-scheme: light; }
+    html.dark { color-scheme: dark; }
+
+    /* Resalta brevemente una transacción recién agregada / restaurada */
+    @keyframes row-flash {
+      from { background-color: rgba(16, 185, 129, 0.18); }
+      to   { background-color: transparent; }
+    }
+    .tx-new { animation: row-flash 1.6s ease-out; }
+
+    /* Salida animada al eliminar */
+    .tx-leave {
+      transition: opacity 200ms ease, transform 200ms ease;
+      opacity: 0;
+      transform: translateX(16px);
+    }
+
+    /* Notificaciones (toasts) */
+    .toast {
+      transition: opacity 220ms ease, transform 220ms ease;
+    }
+    .toast[data-state="enter"],
+    .toast[data-state="leave"] {
+      opacity: 0;
+      transform: translateY(8px) scale(0.98);
+    }
+
+    /* Mantener el scroll del historial discreto */
+    .scroll-thin { scrollbar-width: thin; }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+  </style>
+</head>
+
+<body class="min-h-screen bg-stone-50 text-stone-900 antialiased dark:bg-neutral-950 dark:text-neutral-100">
+  <div class="mx-auto max-w-6xl px-4 pb-16 pt-6 sm:px-6 lg:px-8">
+
+    <!-- ================================================================
+         ENCABEZADO
+         ================================================================ -->
+    <header class="mb-6 flex items-center justify-between gap-4">
+      <div class="flex items-center gap-3">
+        <span class="grid h-11 w-11 place-items-center rounded-2xl bg-stone-900 text-white dark:bg-white dark:text-neutral-900" aria-hidden="true">
+          <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M21 12a2.25 2.25 0 0 0-2.25-2.25H15a3 3 0 1 1-6 0H5.25A2.25 2.25 0 0 0 3 12m18 0v6a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 18v-6m18 0V9M3 12V9m18 0a2.25 2.25 0 0 0-2.25-2.25H5.25A2.25 2.25 0 0 0 3 9m18 0V6a2.25 2.25 0 0 0-2.25-2.25H5.25A2.25 2.25 0 0 0 3 6v3" />
+          </svg>
+        </span>
+        <div>
+          <h1 class="text-xl font-bold tracking-tight sm:text-2xl">Control de Gastos</h1>
+          <p class="text-sm text-stone-500 dark:text-neutral-400">Tus finanzas personales, claras y al día.</p>
+        </div>
+      </div>
+
+      <button id="theme-toggle" type="button"
+        class="grid h-10 w-10 place-items-center rounded-xl text-stone-600 ring-1 ring-black/10 transition hover:bg-white focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-900 dark:text-neutral-300 dark:ring-white/15 dark:hover:bg-neutral-900 dark:focus-visible:ring-white"
+        aria-label="Cambiar entre tema claro y oscuro">
+        <!-- Luna (visible en modo claro) -->
+        <svg class="h-5 w-5 dark:hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M21.752 15.002A9.72 9.72 0 0 1 18 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 0 0 3 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 0 0 9.002-5.998Z" />
+        </svg>
+        <!-- Sol (visible en modo oscuro) -->
+        <svg class="hidden h-5 w-5 dark:block" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v2.25m6.364.386-1.591 1.591M21 12h-2.25m-.386 6.364-1.591-1.591M12 18.75V21m-4.773-4.227-1.591 1.591M5.25 12H3m4.227-4.773L5.636 5.636M15.75 12a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0Z" />
+        </svg>
+      </button>
+    </header>
+
+    <main class="space-y-6">
+
+      <!-- ================================================================
+           DASHBOARD RESUMEN
+           ================================================================ -->
+      <section class="grid gap-4 sm:grid-cols-3" aria-label="Resumen financiero">
+        <!-- Ingresos -->
+        <article class="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-black/5 dark:bg-neutral-900 dark:ring-white/10">
+          <div class="flex items-center justify-between">
+            <h2 class="text-sm font-medium text-stone-500 dark:text-neutral-400">Ingresos totales</h2>
+            <span class="grid h-9 w-9 place-items-center rounded-full bg-emerald-50 text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-400" aria-hidden="true">
+              <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 4.5l-15 15m0 0h11.25M4.5 19.5V8.25" /></svg>
+            </span>
+          </div>
+          <p id="total-income" class="mt-3 truncate text-2xl font-bold tracking-tight text-emerald-600 sm:text-xl lg:text-2xl dark:text-emerald-400">—</p>
+          <p id="income-count" class="mt-1 text-xs text-stone-500 dark:text-neutral-400">&nbsp;</p>
+        </article>
+
+        <!-- Gastos -->
+        <article class="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-black/5 dark:bg-neutral-900 dark:ring-white/10">
+          <div class="flex items-center justify-between">
+            <h2 class="text-sm font-medium text-stone-500 dark:text-neutral-400">Gastos totales</h2>
+            <span class="grid h-9 w-9 place-items-center rounded-full bg-rose-50 text-rose-600 dark:bg-rose-500/10 dark:text-rose-400" aria-hidden="true">
+              <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 19.5l15-15m0 0H8.25m11.25 0v11.25" /></svg>
+            </span>
+          </div>
+          <p id="total-expense" class="mt-3 truncate text-2xl font-bold tracking-tight text-rose-600 sm:text-xl lg:text-2xl dark:text-rose-400">—</p>
+          <p id="expense-count" class="mt-1 text-xs text-stone-500 dark:text-neutral-400">&nbsp;</p>
+        </article>
+
+        <!-- Balance (su estilo cambia según el signo) -->
+        <article id="balance-card" class="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-black/5 transition-colors dark:bg-neutral-900 dark:ring-white/10">
+          <div class="flex items-center justify-between gap-2">
+            <h2 class="text-sm font-medium text-stone-500 dark:text-neutral-400">Balance restante</h2>
+            <span id="balance-badge" class="inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold" role="status"></span>
+          </div>
+          <p id="total-balance" class="mt-3 truncate text-2xl font-bold tracking-tight sm:text-xl lg:text-2xl">—</p>
+          <p id="balance-hint" class="mt-1 text-xs text-stone-500 dark:text-neutral-400">&nbsp;</p>
+        </article>
+      </section>
+
+      <div class="grid grid-cols-1 gap-6 lg:grid-cols-5">
+
+        <!-- Columna izquierda: formulario + gráfico -->
+        <div class="min-w-0 space-y-6 lg:col-span-2">
+
+          <!-- ==============================================================
+               FORMULARIO: NUEVA TRANSACCIÓN
+               ============================================================== -->
+          <section class="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-black/5 dark:bg-neutral-900 dark:ring-white/10" aria-labelledby="form-title">
+            <h2 id="form-title" class="text-base font-semibold">Nueva transacción</h2>
+
+            <form id="tx-form" class="mt-4 space-y-4" novalidate>
+              <!-- Tipo: control segmentado accesible (radios) -->
+              <fieldset>
+                <legend class="sr-only">Tipo de transacción</legend>
+                <div class="grid grid-cols-2 gap-1 rounded-xl bg-stone-100 p-1 dark:bg-neutral-800">
+                  <label class="cursor-pointer">
+                    <input type="radio" name="type" value="expense" class="peer sr-only" checked />
+                    <span class="flex items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-medium text-stone-600 transition peer-checked:bg-white peer-checked:text-rose-600 peer-checked:shadow-sm peer-focus-visible:ring-2 peer-focus-visible:ring-rose-500 dark:text-neutral-300 dark:peer-checked:bg-neutral-950 dark:peer-checked:text-rose-400">
+                      <span aria-hidden="true">−</span> Gasto
+                    </span>
+                  </label>
+                  <label class="cursor-pointer">
+                    <input type="radio" name="type" value="income" class="peer sr-only" />
+                    <span class="flex items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-medium text-stone-600 transition peer-checked:bg-white peer-checked:text-emerald-600 peer-checked:shadow-sm peer-focus-visible:ring-2 peer-focus-visible:ring-emerald-500 dark:text-neutral-300 dark:peer-checked:bg-neutral-950 dark:peer-checked:text-emerald-400">
+                      <span aria-hidden="true">+</span> Ingreso
+                    </span>
+                  </label>
+                </div>
+              </fieldset>
+
+              <!-- Descripción -->
+              <div>
+                <label for="description" class="mb-1 block text-sm font-medium">Descripción</label>
+                <input id="description" name="description" type="text" maxlength="60" autocomplete="off"
+                  placeholder="Ej.: Supermercado"
+                  class="field w-full rounded-xl border-0 bg-stone-50 px-3 py-2.5 text-sm ring-1 ring-inset ring-stone-200 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-stone-900 dark:bg-neutral-950 dark:ring-neutral-700 dark:placeholder:text-neutral-500 dark:focus:ring-white" />
+                <p class="mt-1 hidden text-xs text-rose-600 dark:text-rose-400" data-error-for="description"></p>
+              </div>
+
+              <div class="grid grid-cols-2 gap-3">
+                <!-- Monto -->
+                <div class="min-w-0">
+                  <label for="amount" class="mb-1 block text-sm font-medium">Monto</label>
+                  <div class="relative">
+                    <span class="pointer-events-none absolute inset-y-0 left-3 flex items-center text-sm text-stone-400 dark:text-neutral-500" aria-hidden="true">$</span>
+                    <input id="amount" name="amount" type="number" inputmode="decimal" min="0.01" step="0.01" placeholder="0,00"
+                      class="field w-full rounded-xl border-0 bg-stone-50 py-2.5 pl-7 pr-3 text-sm tabular-nums ring-1 ring-inset ring-stone-200 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-stone-900 dark:bg-neutral-950 dark:ring-neutral-700 dark:placeholder:text-neutral-500 dark:focus:ring-white" />
+                  </div>
+                  <p class="mt-1 hidden text-xs text-rose-600 dark:text-rose-400" data-error-for="amount"></p>
+                </div>
+
+                <!-- Fecha -->
+                <div class="min-w-0">
+                  <label for="date" class="mb-1 block text-sm font-medium">Fecha</label>
+                  <input id="date" name="date" type="date"
+                    class="field w-full rounded-xl border-0 bg-stone-50 px-3 py-2.5 text-sm ring-1 ring-inset ring-stone-200 focus:outline-none focus:ring-2 focus:ring-stone-900 dark:bg-neutral-950 dark:ring-neutral-700 dark:focus:ring-white" />
+                  <p class="mt-1 hidden text-xs text-rose-600 dark:text-rose-400" data-error-for="date"></p>
+                </div>
+              </div>
+
+              <!-- Categoría -->
+              <div>
+                <label for="category" class="mb-1 block text-sm font-medium">Categoría</label>
+                <select id="category" name="category"
+                  class="field w-full rounded-xl border-0 bg-stone-50 px-3 py-2.5 text-sm ring-1 ring-inset ring-stone-200 focus:outline-none focus:ring-2 focus:ring-stone-900 dark:bg-neutral-950 dark:ring-neutral-700 dark:focus:ring-white"></select>
+                <p class="mt-1 hidden text-xs text-rose-600 dark:text-rose-400" data-error-for="category"></p>
+              </div>
+
+              <button id="submit-btn" type="submit"
+                class="flex w-full items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-neutral-900">
+                <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
+                <span id="submit-label">Agregar gasto</span>
+              </button>
+            </form>
+          </section>
+
+          <!-- ==============================================================
+               GRÁFICO: DISTRIBUCIÓN DE GASTOS
+               ============================================================== -->
+          <section class="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-black/5 dark:bg-neutral-900 dark:ring-white/10" aria-labelledby="chart-title">
+            <h2 id="chart-title" class="text-base font-semibold">Gastos por categoría</h2>
+            <p class="text-xs text-stone-500 dark:text-neutral-400">Tocá una categoría para filtrar el historial.</p>
+
+            <div id="chart-wrapper" class="relative mx-auto mt-4 h-56 max-w-xs">
+              <canvas id="expense-chart" role="img" aria-label="Gráfico de dona con la distribución de gastos por categoría"></canvas>
+              <!-- Total en el centro de la dona -->
+              <div class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center">
+                <span class="text-xs text-stone-500 dark:text-neutral-400">Total gastos</span>
+                <span id="chart-center-total" class="text-lg font-bold tracking-tight">—</span>
+              </div>
+            </div>
+
+            <div id="chart-empty" class="mt-4 hidden rounded-xl border border-dashed border-stone-300 px-4 py-10 text-center text-sm text-stone-500 dark:border-neutral-700 dark:text-neutral-400">
+              Todavía no registraste gastos.<br />El gráfico aparecerá cuando agregues uno.
+            </div>
+
+            <!-- Leyenda / tabla: nombre, monto y porcentaje (la identidad nunca depende solo del color) -->
+            <ul id="chart-legend" class="mt-4 space-y-0.5" aria-label="Detalle de gastos por categoría"></ul>
+          </section>
+        </div>
+
+        <!-- ================================================================
+             HISTORIAL DE TRANSACCIONES
+             ================================================================ -->
+        <section id="history" class="flex min-w-0 scroll-mt-4 flex-col rounded-2xl bg-white shadow-sm ring-1 ring-black/5 lg:col-span-3 dark:bg-neutral-900 dark:ring-white/10" aria-labelledby="history-title">
+          <div class="space-y-3 border-b border-stone-100 p-5 dark:border-neutral-800">
+            <div class="flex flex-wrap items-baseline justify-between gap-2">
+              <h2 id="history-title" class="text-base font-semibold">Historial</h2>
+              <p id="history-meta" class="text-xs text-stone-500 dark:text-neutral-400" aria-live="polite"></p>
+            </div>
+
+            <!-- Filtros en una sola fila -->
+            <div class="flex flex-wrap items-center gap-2">
+              <div class="inline-flex rounded-xl bg-stone-100 p-1 dark:bg-neutral-800" role="group" aria-label="Filtrar por tipo">
+                <button type="button" data-filter-type="all" class="filter-type-btn rounded-lg px-3 py-1.5 text-sm font-medium transition">Todos</button>
+                <button type="button" data-filter-type="income" class="filter-type-btn rounded-lg px-3 py-1.5 text-sm font-medium transition">Ingresos</button>
+                <button type="button" data-filter-type="expense" class="filter-type-btn rounded-lg px-3 py-1.5 text-sm font-medium transition">Gastos</button>
+              </div>
+
+              <label for="filter-category" class="sr-only">Filtrar por categoría</label>
+              <select id="filter-category"
+                class="min-w-0 flex-1 rounded-xl border-0 bg-stone-50 px-3 py-2 text-sm ring-1 ring-inset ring-stone-200 focus:outline-none focus:ring-2 focus:ring-stone-900 sm:flex-none dark:bg-neutral-950 dark:ring-neutral-700 dark:focus:ring-white"></select>
+
+              <button id="clear-filters" type="button"
+                class="hidden rounded-lg px-2 py-1.5 text-sm font-medium text-stone-600 underline-offset-2 hover:underline dark:text-neutral-300">
+                Limpiar filtros
+              </button>
+            </div>
+          </div>
+
+          <!--
+            En escritorio el listado ocupa el alto de la columna izquierda y
+            hace scroll interno (posición absoluta = no estira la tarjeta).
+          -->
+          <div class="relative overflow-hidden rounded-b-2xl lg:min-h-[24rem] lg:flex-1">
+            <div class="scroll-thin lg:absolute lg:inset-0 lg:overflow-y-auto">
+              <ul id="tx-list" class="divide-y divide-stone-100 dark:divide-neutral-800"></ul>
+
+          <div id="tx-empty" class="hidden px-5 py-14 text-center">
+            <p class="text-3xl" aria-hidden="true">🗂️</p>
+            <p class="mt-2 text-sm font-medium">No hay transacciones para mostrar</p>
+            <p id="tx-empty-hint" class="mt-1 text-xs text-stone-500 dark:text-neutral-400"></p>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <footer class="mt-10 flex flex-col items-center gap-2 text-center text-xs text-stone-500 sm:flex-row sm:justify-between dark:text-neutral-400">
+      <p>Los datos se guardan solo en este navegador (localStorage).</p>
+      <button id="reset-demo" type="button" class="font-medium underline-offset-2 hover:text-stone-900 hover:underline dark:hover:text-white">
+        Restaurar datos de ejemplo
+      </button>
+    </footer>
+  </div>
+
+  <!-- Contenedor de notificaciones -->
+  <div id="toast-region" class="pointer-events-none fixed inset-x-0 bottom-0 z-50 flex flex-col items-center gap-2 p-4 sm:items-end sm:p-6" aria-live="polite" aria-atomic="false"></div>
+
+  <script>
+  'use strict';
+
+  /* ======================================================================
+     1. CONFIGURACIÓN
+     ====================================================================== */
+  const CONFIG = Object.freeze({
+    STORAGE_KEY: 'gastos-app:transactions',
+    THEME_KEY: 'gastos-app:theme',
+    LOCALE: 'es-AR',
+    CURRENCY: 'ARS',
+    TOAST_MS: 3500,
+    UNDO_TOAST_MS: 6000,
+  });
+
+  /**
+   * Categorías predefinidas. `cssVar` apunta al token de color definido en
+   * <style>, de modo que el color de cada categoría es fijo en toda la app.
+   */
+  const CATEGORIES = Object.freeze([
+    { id: 'Alimentación', icon: '🛒', cssVar: '--cat-alimentacion' },
+    { id: 'Transporte',   icon: '🚌', cssVar: '--cat-transporte' },
+    { id: 'Vivienda',     icon: '🏠', cssVar: '--cat-vivienda' },
+    { id: 'Ocio',         icon: '🎬', cssVar: '--cat-ocio' },
+    { id: 'Servicios',    icon: '💡', cssVar: '--cat-servicios' },
+    { id: 'Salud',        icon: '💊', cssVar: '--cat-salud' },
+    { id: 'Sueldo',       icon: '💼', cssVar: '--cat-sueldo' },
+    { id: 'Otros',        icon: '📦', cssVar: '--cat-otros' },
+  ]);
+
+  const CATEGORY_MAP = new Map(CATEGORIES.map((c) => [c.id, c]));
+
+  /** Categoría sugerida por defecto según el tipo de transacción. */
+  const DEFAULT_CATEGORY = Object.freeze({ income: 'Sueldo', expense: 'Alimentación' });
+
+  const TYPE_LABEL = Object.freeze({ income: 'Ingreso', expense: 'Gasto' });
+
+  /* ======================================================================
+     2. UTILIDADES
+     ====================================================================== */
+  const currencyFormatter = new Intl.NumberFormat(CONFIG.LOCALE, {
+    style: 'currency',
+    currency: CONFIG.CURRENCY,
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+
+  const percentFormatter = new Intl.NumberFormat(CONFIG.LOCALE, {
+    style: 'percent',
+    maximumFractionDigits: 1,
+  });
+
+  const formatMoney = (value) => currencyFormatter.format(value);
+  const formatPercent = (ratio) => percentFormatter.format(ratio);
+
+  /** Fecha local en formato YYYY-MM-DD (sin desfasajes por zona horaria). */
+  function toISODate(date) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
+  const todayISO = () => toISODate(new Date());
+
+  function daysAgoISO(days) {
+    const d = new Date();
+    d.setDate(d.getDate() - days);
+    return toISODate(d);
+  }
+
+  /** Convierte "2026-11-07" en "07 nov 2026" interpretándola como fecha local. */
+  function formatDate(iso) {
+    const [y, m, d] = iso.split('-').map(Number);
+    return new Date(y, m - 1, d).toLocaleDateString(CONFIG.LOCALE, {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+    });
+  }
+
+  function isValidISODate(iso) {
+    if (typeof iso !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return false;
+    const [y, m, d] = iso.split('-').map(Number);
+    const date = new Date(y, m - 1, d);
+    return date.getFullYear() === y && date.getMonth() === m - 1 && date.getDate() === d;
+  }
+
+  function generateId() {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  /** Escapa texto del usuario antes de insertarlo como HTML (previene XSS). */
+  function escapeHtml(value) {
+    return String(value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  const plural = (n, singular, pluralForm) => `${n} ${n === 1 ? singular : pluralForm}`;
+
+  const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+  const isDarkMode = () => document.documentElement.classList.contains('dark');
+
+  /** Reemplaza un conjunto de clases por otro en un elemento. */
+  function swapClasses(el, remove, add) {
+    el.classList.remove(...remove);
+    el.classList.add(...add);
+  }
+
+  /* ======================================================================
+     3. PERSISTENCIA (localStorage)
+     ====================================================================== */
+  const Store = {
+    /**
+     * Devuelve la lista guardada, o `null` si no hay nada guardado (o si el
+     * contenido es ilegible), en cuyo caso se cargan los datos de ejemplo.
+     */
+    load() {
+      try {
+        const raw = localStorage.getItem(CONFIG.STORAGE_KEY);
+        if (raw === null) return null;
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return null;
+        return parsed.map(normalizeTransaction).filter(Boolean);
+      } catch (err) {
+        console.warn('No se pudieron leer los datos guardados:', err);
+        return null;
+      }
+    },
+
+    save(list) {
+      try {
+        localStorage.setItem(CONFIG.STORAGE_KEY, JSON.stringify(list));
+        return true;
+      } catch (err) {
+        console.warn('No se pudieron guardar los datos:', err);
+        showToast('No se pudo guardar en el navegador. Los cambios se perderán al recargar.', { type: 'error' });
+        return false;
+      }
+    },
+  };
+
+  /** Valida/sanea un registro leído del almacenamiento. Devuelve null si es inválido. */
+  function normalizeTransaction(tx) {
+    if (!tx || typeof tx !== 'object') return null;
+    const amount = Number(tx.amount);
+    if (typeof tx.description !== 'string' || !tx.description.trim()) return null;
+    if (!Number.isFinite(amount) || amount <= 0) return null;
+    if (tx.type !== 'income' && tx.type !== 'expense') return null;
+    if (!isValidISODate(tx.date)) return null;
+
+    return {
+      id: typeof tx.id === 'string' && tx.id ? tx.id : generateId(),
+      description: tx.description.trim().slice(0, 60),
+      amount: Math.round(amount * 100) / 100,
+      type: tx.type,
+      category: CATEGORY_MAP.has(tx.category) ? tx.category : 'Otros',
+      date: tx.date,
+      createdAt: Number(tx.createdAt) || Date.now(),
+    };
+  }
+
+  /** Datos de ejemplo con fechas relativas a hoy, para que siempre luzcan actuales. */
+  function buildSeedData() {
+    const seed = [
+      ['Sueldo mensual',           850000, 'income',  'Sueldo',       2],
+      ['Proyecto freelance',       180000, 'income',  'Otros',        12],
+      ['Sueldo mensual',           850000, 'income',  'Sueldo',       32],
+      ['Alquiler departamento',    320000, 'expense', 'Vivienda',     3],
+      ['Supermercado',              68500, 'expense', 'Alimentación', 1],
+      ['Verdulería',                12400, 'expense', 'Alimentación', 6],
+      ['Carga SUBE',                15000, 'expense', 'Transporte',   4],
+      ['Nafta',                     42000, 'expense', 'Transporte',   10],
+      ['Cine y cena',               38000, 'expense', 'Ocio',         5],
+      ['Internet y TV',             28900, 'expense', 'Servicios',    7],
+      ['Luz y gas',                 35600, 'expense', 'Servicios',    9],
+      ['Farmacia',                  18700, 'expense', 'Salud',        8],
+      ['Suscripción streaming',      9800, 'expense', 'Ocio',         14],
+      ['Regalo de cumpleaños',      25000, 'expense', 'Otros',        16],
+      ['Supermercado',              72300, 'expense', 'Alimentación', 20],
+      ['Alquiler departamento',    320000, 'expense', 'Vivienda',     33],
+    ];
+
+    const now = Date.now();
+    return seed.map(([description, amount, type, category, daysAgo], i) => ({
+      id: generateId(),
+      description,
+      amount,
+      type,
+      category,
+      date: daysAgoISO(daysAgo),
+      createdAt: now - i, // desempate estable para fechas iguales
+    }));
+  }
+
+  /* ======================================================================
+     4. ESTADO DE LA APLICACIÓN
+     ====================================================================== */
+  const state = {
+    transactions: [],
+    filters: { type: 'all', category: 'all' },
+    highlightId: null, // fila a resaltar en el próximo render
+  };
+
+  /** Persiste y vuelve a renderizar todo. Punto único de "commit" de cambios. */
+  function commit() {
+    Store.save(state.transactions);
+    renderAll();
+  }
+
+  function addTransaction(tx) {
+    state.transactions.push(tx);
+    state.highlightId = tx.id;
+    commit();
+  }
+
+  function removeTransaction(id) {
+    const index = state.transactions.findIndex((t) => t.id === id);
+    if (index === -1) return null;
+    const [removed] = state.transactions.splice(index, 1);
+    commit();
+    return removed;
+  }
+
+  /* ======================================================================
+     5. CÁLCULOS / SELECTORES
+     ====================================================================== */
+  /** Más reciente primero; ante la misma fecha, la última cargada primero. */
+  const byDateDesc = (a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt;
+
+  function computeTotals(list) {
+    return list.reduce(
+      (acc, t) => {
+        acc[t.type] += t.amount;
+        acc.count[t.type] += 1;
+        return acc;
+      },
+      { income: 0, expense: 0, count: { income: 0, expense: 0 } }
+    );
+  }
+
+  /** Gastos agrupados por categoría, ordenados de mayor a menor. */
+  function expensesByCategory(list) {
+    const totals = new Map();
+    for (const t of list) {
+      if (t.type !== 'expense') continue;
+      totals.set(t.category, (totals.get(t.category) || 0) + t.amount);
+    }
+    return [...totals.entries()]
+      .map(([category, total]) => ({ category, total }))
+      .sort((a, b) => b.total - a.total);
+  }
+
+  function getFilteredTransactions() {
+    const { type, category } = state.filters;
+    return state.transactions
+      .filter((t) => (type === 'all' || t.type === type) && (category === 'all' || t.category === category))
+      .sort(byDateDesc);
+  }
+
+  const hasActiveFilters = () => state.filters.type !== 'all' || state.filters.category !== 'all';
+
+  /* ======================================================================
+     6. REFERENCIAS AL DOM
+     ====================================================================== */
+  const $ = (id) => document.getElementById(id);
+
+  const dom = {
+    totalIncome: $('total-income'),
+    totalExpense: $('total-expense'),
+    totalBalance: $('total-balance'),
+    incomeCount: $('income-count'),
+    expenseCount: $('expense-count'),
+    balanceCard: $('balance-card'),
+    balanceBadge: $('balance-badge'),
+    balanceHint: $('balance-hint'),
+
+    form: $('tx-form'),
+    submitBtn: $('submit-btn'),
+    submitLabel: $('submit-label'),
+    categorySelect: $('category'),
+
+    txList: $('tx-list'),
+    txEmpty: $('tx-empty'),
+    txEmptyHint: $('tx-empty-hint'),
+    historySection: $('history'),
+    historyMeta: $('history-meta'),
+    filterTypeButtons: document.querySelectorAll('[data-filter-type]'),
+    filterCategory: $('filter-category'),
+    clearFilters: $('clear-filters'),
+
+    chartCanvas: $('expense-chart'),
+    chartWrapper: $('chart-wrapper'),
+    chartEmpty: $('chart-empty'),
+    chartLegend: $('chart-legend'),
+    chartCenterTotal: $('chart-center-total'),
+
+    themeToggle: $('theme-toggle'),
+    resetDemo: $('reset-demo'),
+    toastRegion: $('toast-region'),
+  };
+
+  /* ======================================================================
+     7. RENDER: DASHBOARD RESUMEN
+     ====================================================================== */
+  const BALANCE_STYLES = {
+    positive: {
+      amount: ['text-emerald-600', 'dark:text-emerald-400'],
+      badge: ['bg-emerald-50', 'text-emerald-700', 'dark:bg-emerald-500/10', 'dark:text-emerald-400'],
+      card: ['ring-emerald-500/30', 'dark:ring-emerald-400/30'],
+      label: '▲ Positivo',
+    },
+    negative: {
+      amount: ['text-rose-600', 'dark:text-rose-400'],
+      badge: ['bg-rose-50', 'text-rose-700', 'dark:bg-rose-500/10', 'dark:text-rose-400'],
+      card: ['ring-rose-500/40', 'dark:ring-rose-400/40'],
+      label: '▼ Negativo',
+    },
+    neutral: {
+      amount: ['text-stone-900', 'dark:text-neutral-100'],
+      badge: ['bg-stone-100', 'text-stone-600', 'dark:bg-neutral-800', 'dark:text-neutral-300'],
+      card: ['ring-black/5', 'dark:ring-white/10'],
+      label: '● En equilibrio',
+    },
+  };
+  const ALL_BALANCE_CLASSES = {
+    amount: Object.values(BALANCE_STYLES).flatMap((s) => s.amount),
+    badge: Object.values(BALANCE_STYLES).flatMap((s) => s.badge),
+    card: Object.values(BALANCE_STYLES).flatMap((s) => s.card),
+  };
+
+  function renderSummary() {
+    const totals = computeTotals(state.transactions);
+    const balance = Math.round((totals.income - totals.expense) * 100) / 100;
+
+    dom.totalIncome.textContent = formatMoney(totals.income);
+    dom.totalExpense.textContent = formatMoney(totals.expense);
+    dom.totalBalance.textContent = formatMoney(balance);
+    dom.incomeCount.textContent = plural(totals.count.income, 'movimiento', 'movimientos');
+    dom.expenseCount.textContent = plural(totals.count.expense, 'movimiento', 'movimientos');
+
+    // Indicador visual del signo del balance (color + ícono + texto)
+    const sign = balance > 0 ? 'positive' : balance < 0 ? 'negative' : 'neutral';
+    const style = BALANCE_STYLES[sign];
+    swapClasses(dom.totalBalance, ALL_BALANCE_CLASSES.amount, style.amount);
+    swapClasses(dom.balanceBadge, ALL_BALANCE_CLASSES.badge, style.badge);
+    swapClasses(dom.balanceCard, ALL_BALANCE_CLASSES.card, style.card);
+    dom.balanceBadge.textContent = style.label;
+
+    // Mensaje contextual
+    if (totals.income > 0 && balance >= 0) {
+      dom.balanceHint.textContent = `Ahorrás el ${formatPercent(balance / totals.income)} de tus ingresos`;
+    } else if (totals.income > 0) {
+      dom.balanceHint.textContent = `Gastaste ${formatPercent(-balance / totals.income)} más de lo que ingresaste`;
+    } else if (totals.expense > 0) {
+      dom.balanceHint.textContent = 'Aún no registraste ingresos';
+    } else {
+      dom.balanceHint.textContent = 'Sin movimientos registrados';
+    }
+  }
+
+  /* ======================================================================
+     8. RENDER: HISTORIAL Y FILTROS
+     ====================================================================== */
+  function transactionRowTemplate(tx) {
+    const cat = CATEGORY_MAP.get(tx.category);
+    const isIncome = tx.type === 'income';
+    const amountClass = isIncome ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400';
+    const sign = isIncome ? '+' : '−';
+    const highlight = tx.id === state.highlightId ? ' tx-new' : '';
+
+    return `
+      <li class="tx-row group flex items-center gap-3 px-5 py-3.5${highlight}" data-id="${escapeHtml(tx.id)}">
+        <span class="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-stone-100 text-lg dark:bg-neutral-800" aria-hidden="true">${cat.icon}</span>
+        <div class="min-w-0 flex-1">
+          <p class="truncate text-sm font-medium">${escapeHtml(tx.description)}</p>
+          <p class="mt-0.5 flex flex-wrap items-center gap-x-2 text-xs text-stone-500 dark:text-neutral-400">
+            <span class="inline-flex items-center gap-1.5">
+              <span class="h-2 w-2 rounded-full" style="background: var(${cat.cssVar})" aria-hidden="true"></span>${escapeHtml(cat.id)}
+            </span>
+            <span class="hidden sm:inline" aria-hidden="true">·</span>
+            <time datetime="${tx.date}">${formatDate(tx.date)}</time>
+            <span class="sr-only">· ${TYPE_LABEL[tx.type]}</span>
+          </p>
+        </div>
+        <p class="whitespace-nowrap text-right text-sm font-semibold tabular-nums ${amountClass}">${sign} ${formatMoney(tx.amount)}</p>
+        <button type="button" data-action="delete" data-id="${escapeHtml(tx.id)}"
+          class="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-stone-300 transition group-hover:text-stone-500 hover:!bg-rose-50 hover:!text-rose-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 dark:text-neutral-600 dark:group-hover:text-neutral-400 dark:hover:!bg-rose-500/10 dark:hover:!text-rose-400"
+          aria-label="Eliminar ${escapeHtml(tx.description)}" title="Eliminar">
+          <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
+          </svg>
+        </button>
+      </li>`;
+  }
+
+  function renderFilters() {
+    dom.filterTypeButtons.forEach((btn) => {
+      const active = btn.dataset.filterType === state.filters.type;
+      btn.setAttribute('aria-pressed', String(active));
+      swapClasses(
+        btn,
+        active
+          ? ['text-stone-600', 'dark:text-neutral-300', 'hover:text-stone-900', 'dark:hover:text-white']
+          : ['bg-white', 'shadow-sm', 'text-stone-900', 'dark:bg-neutral-950', 'dark:text-white'],
+        active
+          ? ['bg-white', 'shadow-sm', 'text-stone-900', 'dark:bg-neutral-950', 'dark:text-white']
+          : ['text-stone-600', 'dark:text-neutral-300', 'hover:text-stone-900', 'dark:hover:text-white']
+      );
+    });
+    dom.filterCategory.value = state.filters.category;
+    dom.clearFilters.classList.toggle('hidden', !hasActiveFilters());
+  }
+
+  function renderTransactions() {
+    const filtered = getFilteredTransactions();
+
+    dom.txList.innerHTML = filtered.map(transactionRowTemplate).join('');
+    dom.txList.classList.toggle('hidden', filtered.length === 0);
+    dom.txEmpty.classList.toggle('hidden', filtered.length > 0);
+    dom.txEmptyHint.textContent = hasActiveFilters()
+      ? 'Probá cambiar o limpiar los filtros.'
+      : 'Agregá tu primera transacción con el formulario.';
+
+    // Resumen del listado filtrado
+    const totals = computeTotals(filtered);
+    const net = totals.income - totals.expense;
+    const countText = hasActiveFilters()
+      ? `${filtered.length} de ${plural(state.transactions.length, 'transacción', 'transacciones')}`
+      : plural(filtered.length, 'transacción', 'transacciones');
+    dom.historyMeta.textContent = filtered.length ? `${countText} · Neto ${formatMoney(net)}` : countText;
+
+    state.highlightId = null; // el resaltado es de un solo uso
+  }
+
+  /* ======================================================================
+     9. RENDER: GRÁFICO (Chart.js)
+     ====================================================================== */
+  let expenseChart = null;
+  let chartRows = []; // filas actualmente graficadas (para tooltip / clics)
+
+  /** Colores del "chrome" del gráfico tomados de los tokens CSS del tema actual. */
+  function getChartTheme() {
+    return {
+      surface: cssVar('--surface'),
+      textPrimary: cssVar('--text-primary'),
+      textSecondary: cssVar('--text-secondary'),
+      border: cssVar('--tooltip-border'),
+    };
+  }
+
+  function buildChart() {
+    return new Chart(dom.chartCanvas, {
+      type: 'doughnut',
+      data: { labels: [], datasets: [{ data: [] }] },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        cutout: '70%',
+        layout: { padding: 8 },
+        animation: { animateRotate: true, duration: 600 },
+        plugins: {
+          legend: { display: false }, // usamos una leyenda HTML más rica
+          tooltip: {
+            padding: 10,
+            cornerRadius: 8,
+            borderWidth: 1,
+            boxPadding: 4,
+            usePointStyle: true,
+            callbacks: {
+              label(ctx) {
+                const total = chartRows.reduce((s, r) => s + r.total, 0);
+                const share = total ? ctx.parsed / total : 0;
+                return ` ${formatMoney(ctx.parsed)} · ${formatPercent(share)}`;
+              },
+            },
+          },
+        },
+        onHover(evt, elements) {
+          evt.native.target.style.cursor = elements.length ? 'pointer' : 'default';
+        },
+        onClick(evt, elements) {
+          if (!elements.length) return;
+          const row = chartRows[elements[0].index];
+          if (row) toggleCategoryFromChart(row.category);
+        },
+      },
+    });
+  }
+
+  function renderChart() {
+    chartRows = expensesByCategory(state.transactions);
+    const total = chartRows.reduce((s, r) => s + r.total, 0);
+    const hasData = chartRows.length > 0;
+
+    dom.chartWrapper.classList.toggle('hidden', !hasData);
+    dom.chartEmpty.classList.toggle('hidden', hasData);
+    dom.chartCenterTotal.textContent = formatMoney(total);
+
+    renderChartLegend(total);
+    if (!hasData) return;
+
+    if (typeof Chart === 'undefined') {
+      // Chart.js no cargó (sin conexión): la leyenda sigue mostrando los datos.
+      dom.chartWrapper.classList.add('hidden');
+      return;
+    }
+
+    const theme = getChartTheme();
+    if (!expenseChart) expenseChart = buildChart();
+    highlightedSlice = null;
+
+    const dataset = expenseChart.data.datasets[0];
+    expenseChart.data.labels = chartRows.map((r) => r.category);
+    dataset.data = chartRows.map((r) => r.total);
+    dataset.backgroundColor = chartRows.map((r) => cssVar(CATEGORY_MAP.get(r.category).cssVar));
+    dataset.borderColor = theme.surface; // separación de 2px entre porciones
+    dataset.borderWidth = 2;
+    dataset.borderRadius = 4;
+    dataset.hoverOffset = 6;
+    dataset.hoverBorderColor = theme.surface;
+
+    const tooltip = expenseChart.options.plugins.tooltip;
+    tooltip.backgroundColor = theme.surface;
+    tooltip.titleColor = theme.textPrimary;
+    tooltip.bodyColor = theme.textSecondary;
+    tooltip.borderColor = theme.border;
+
+    expenseChart.update();
+  }
+
+  /** Leyenda en HTML: funciona también como tabla de datos accesible. */
+  function renderChartLegend(total) {
+    const activeCategory = state.filters.category;
+    dom.chartLegend.innerHTML = chartRows
+      .map((row, index) => {
+        const cat = CATEGORY_MAP.get(row.category);
+        const active = activeCategory === row.category;
+        return `
+          <li>
+            <button type="button" data-legend-index="${index}" aria-pressed="${active}"
+              class="flex w-full items-center gap-3 rounded-lg px-2 py-1.5 text-left transition hover:bg-stone-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-900 dark:hover:bg-neutral-800 dark:focus-visible:ring-white ${active ? 'bg-stone-100 dark:bg-neutral-800' : ''}">
+              <span class="h-2.5 w-2.5 shrink-0 rounded-full" style="background: var(${cat.cssVar})" aria-hidden="true"></span>
+              <span class="flex-1 truncate text-sm ${active ? 'font-semibold' : ''}">${escapeHtml(cat.id)}</span>
+              <span class="text-sm font-medium tabular-nums">${formatMoney(row.total)}</span>
+              <span class="w-12 text-right text-xs tabular-nums text-stone-500 dark:text-neutral-400">${formatPercent(total ? row.total / total : 0)}</span>
+            </button>
+          </li>`;
+      })
+      .join('');
+  }
+
+  /** Resalta en la dona la porción correspondiente a una fila de la leyenda. */
+  let highlightedSlice = null;
+  function highlightChartSlice(index) {
+    if (!expenseChart || index === highlightedSlice) return;
+    highlightedSlice = index;
+    const active = index === null ? [] : [{ datasetIndex: 0, index }];
+    expenseChart.setActiveElements(active);
+    expenseChart.tooltip.setActiveElements(active, { x: 0, y: 0 });
+    expenseChart.update();
+  }
+
+  /* ======================================================================
+     10. RENDER GENERAL
+     ====================================================================== */
+  function renderAll() {
+    renderSummary();
+    renderFilters();
+    renderTransactions();
+    renderChart();
+  }
+
+  /* ======================================================================
+     11. NOTIFICACIONES (TOASTS)
+     ====================================================================== */
+  const TOAST_STYLES = {
+    success: { icon: '✓', iconClass: 'bg-emerald-500 text-white' },
+    error:   { icon: '!', iconClass: 'bg-rose-500 text-white' },
+    info:    { icon: 'i', iconClass: 'bg-stone-500 text-white dark:bg-neutral-500' },
+  };
+
+  /**
+   * Muestra una notificación breve.
+   * @param {string} message
+   * @param {{type?: 'success'|'error'|'info', actionLabel?: string, onAction?: Function, duration?: number}} [opts]
+   */
+  function showToast(message, opts = {}) {
+    const { type = 'success', actionLabel, onAction, duration = CONFIG.TOAST_MS } = opts;
+    const style = TOAST_STYLES[type] || TOAST_STYLES.info;
+
+    const toast = document.createElement('div');
+    toast.className =
+      'toast pointer-events-auto flex w-full max-w-sm items-center gap-3 rounded-xl bg-white px-4 py-3 text-sm shadow-lg ring-1 ring-black/10 dark:bg-neutral-800 dark:ring-white/10';
+    toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
+    toast.dataset.state = 'enter';
+
+    const icon = document.createElement('span');
+    icon.className = `grid h-6 w-6 shrink-0 place-items-center rounded-full text-xs font-bold ${style.iconClass}`;
+    icon.setAttribute('aria-hidden', 'true');
+    icon.textContent = style.icon;
+
+    const text = document.createElement('p');
+    text.className = 'flex-1';
+    text.textContent = message;
+
+    toast.append(icon, text);
+
+    let timer = null;
+    const dismiss = () => {
+      clearTimeout(timer);
+      toast.dataset.state = 'leave';
+      setTimeout(() => toast.remove(), 240);
+    };
+
+    if (actionLabel && typeof onAction === 'function') {
+      const action = document.createElement('button');
+      action.type = 'button';
+      action.className =
+        'shrink-0 rounded-md px-2 py-1 text-sm font-semibold text-stone-900 underline-offset-2 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-900 dark:text-white dark:focus-visible:ring-white';
+      action.textContent = actionLabel;
+      action.addEventListener('click', () => {
+        onAction();
+        dismiss();
+      });
+      toast.append(action);
+    }
+
+    dom.toastRegion.append(toast);
+    requestAnimationFrame(() => requestAnimationFrame(() => (toast.dataset.state = 'visible')));
+
+    // Pausa el cierre automático mientras el usuario interactúa con el toast
+    const startTimer = () => (timer = setTimeout(dismiss, duration));
+    toast.addEventListener('mouseenter', () => clearTimeout(timer));
+    toast.addEventListener('mouseleave', startTimer);
+    startTimer();
+
+    // Limita la pila a 3 notificaciones visibles
+    const toasts = dom.toastRegion.querySelectorAll('.toast');
+    if (toasts.length > 3) toasts[0].remove();
+  }
+
+  /* ======================================================================
+     12. FORMULARIO
+     ====================================================================== */
+  function populateCategorySelects() {
+    const options = CATEGORIES.map((c) => `<option value="${escapeHtml(c.id)}">${c.icon} ${escapeHtml(c.id)}</option>`).join('');
+    dom.categorySelect.innerHTML = options;
+    dom.filterCategory.innerHTML = `<option value="all">Todas las categorías</option>${options}`;
+  }
+
+  const getFormType = () => dom.form.elements.type.value;
+
+  /** Ajusta el botón y la categoría sugerida cuando cambia el tipo. */
+  function syncFormWithType(type) {
+    const otherType = type === 'income' ? 'expense' : 'income';
+    // Solo cambia la categoría si el usuario no eligió una distinta de la sugerida
+    if (dom.categorySelect.value === DEFAULT_CATEGORY[otherType]) {
+      dom.categorySelect.value = DEFAULT_CATEGORY[type];
+    }
+
+    dom.submitLabel.textContent = type === 'income' ? 'Agregar ingreso' : 'Agregar gasto';
+    const incomeClasses = ['bg-emerald-600', 'hover:bg-emerald-700', 'focus-visible:ring-emerald-500'];
+    const expenseClasses = ['bg-rose-600', 'hover:bg-rose-700', 'focus-visible:ring-rose-500'];
+    swapClasses(
+      dom.submitBtn,
+      type === 'income' ? expenseClasses : incomeClasses,
+      type === 'income' ? incomeClasses : expenseClasses
+    );
+  }
+
+  function readForm() {
+    const f = dom.form.elements;
+    return {
+      description: f.description.value.trim(),
+      amountRaw: f.amount.value,
+      type: getFormType(),
+      category: f.category.value,
+      date: f.date.value,
+    };
+  }
+
+  /** Devuelve un objeto { campo: mensaje } con los errores encontrados. */
+  function validateForm(data) {
+    const errors = {};
+    const amount = Number(data.amountRaw);
+
+    if (!data.description) errors.description = 'Ingresá una descripción.';
+    else if (data.description.length > 60) errors.description = 'Máximo 60 caracteres.';
+
+    if (data.amountRaw === '' || !Number.isFinite(amount)) errors.amount = 'Ingresá un monto válido.';
+    else if (amount <= 0) errors.amount = 'El monto debe ser mayor a 0.';
+    else if (amount > 1e12) errors.amount = 'El monto es demasiado grande.';
+
+    if (!CATEGORY_MAP.has(data.category)) errors.category = 'Elegí una categoría.';
+    if (!isValidISODate(data.date)) errors.date = 'Elegí una fecha válida.';
+
+    return errors;
+  }
+
+  function showFormErrors(errors) {
+    dom.form.querySelectorAll('[data-error-for]').forEach((el) => {
+      const field = el.dataset.errorFor;
+      const input = dom.form.elements[field];
+      const message = errors[field];
+
+      el.textContent = message || '';
+      el.classList.toggle('hidden', !message);
+      if (input) {
+        input.setAttribute('aria-invalid', String(Boolean(message)));
+        input.classList.toggle('ring-rose-500', Boolean(message));
+        input.classList.toggle('dark:ring-rose-400', Boolean(message));
+      }
+    });
+  }
+
+  function handleSubmit(event) {
+    event.preventDefault();
+    const data = readForm();
+    const errors = validateForm(data);
+    showFormErrors(errors);
+
+    const firstInvalid = Object.keys(errors)[0];
+    if (firstInvalid) {
+      dom.form.elements[firstInvalid].focus();
+      showToast('Revisá los campos marcados.', { type: 'error' });
+      return;
+    }
+
+    const tx = {
+      id: generateId(),
+      description: data.description,
+      amount: Math.round(Number(data.amountRaw) * 100) / 100,
+      type: data.type,
+      category: data.category,
+      date: data.date,
+      createdAt: Date.now(),
+    };
+
+    // Si el filtro activo ocultaría la nueva transacción, se limpia para que se vea.
+    const hiddenByFilter =
+      (state.filters.type !== 'all' && state.filters.type !== tx.type) ||
+      (state.filters.category !== 'all' && state.filters.category !== tx.category);
+    if (hiddenByFilter) state.filters = { type: 'all', category: 'all' };
+
+    addTransaction(tx);
+
+    // Limpia solo los campos variables; conserva tipo, categoría y fecha.
+    dom.form.elements.description.value = '';
+    dom.form.elements.amount.value = '';
+    dom.form.elements.description.focus();
+
+    flashSubmitButton();
+    showToast(`${TYPE_LABEL[tx.type]} agregado: ${tx.description} (${formatMoney(tx.amount)})`);
+  }
+
+  /** Feedback breve en el botón tras guardar. */
+  function flashSubmitButton() {
+    dom.submitLabel.textContent = '¡Agregado!';
+    dom.submitBtn.disabled = true;
+    setTimeout(() => {
+      dom.submitBtn.disabled = false;
+      // Recalcula por si el tipo cambió mientras tanto
+      dom.submitLabel.textContent = getFormType() === 'income' ? 'Agregar ingreso' : 'Agregar gasto';
+    }, 900);
+  }
+
+  /* ======================================================================
+     13. ACCIONES: ELIMINAR, FILTRAR, TEMA, DATOS DE EJEMPLO
+     ====================================================================== */
+  function handleDelete(id, rowEl) {
+    const finish = () => {
+      const removed = removeTransaction(id);
+      if (!removed) return;
+      showToast(`Se eliminó "${removed.description}".`, {
+        type: 'info',
+        actionLabel: 'Deshacer',
+        duration: CONFIG.UNDO_TOAST_MS,
+        onAction: () => {
+          if (state.transactions.some((t) => t.id === removed.id)) return;
+          addTransaction(removed);
+          showToast('Transacción restaurada.');
+        },
+      });
+    };
+
+    // Animación de salida antes de quitar la fila
+    if (rowEl && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      rowEl.classList.add('tx-leave');
+      setTimeout(finish, 200);
+    } else {
+      finish();
+    }
+  }
+
+  function setFilters(next) {
+    state.filters = { ...state.filters, ...next };
+    renderFilters();
+    renderTransactions();
+    renderChartLegend(chartRows.reduce((s, r) => s + r.total, 0));
+  }
+
+  /** Clic en la dona o en la leyenda: filtra (o quita el filtro) por esa categoría. */
+  function toggleCategoryFromChart(category) {
+    const isActive = state.filters.category === category;
+    setFilters(isActive ? { type: 'all', category: 'all' } : { type: 'expense', category });
+
+    // En pantallas chicas el historial está debajo: lo traemos a la vista.
+    if (!isActive && window.innerWidth < 1024) {
+      dom.historySection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }
+
+  function toggleTheme() {
+    const dark = !isDarkMode();
+    document.documentElement.classList.toggle('dark', dark);
+    try {
+      localStorage.setItem(CONFIG.THEME_KEY, dark ? 'dark' : 'light');
+    } catch (e) { /* preferencia no persistida; no es crítico */ }
+    renderChart(); // los colores del gráfico dependen del tema
+  }
+
+  function resetDemoData() {
+    const ok = window.confirm('Esto reemplazará todas tus transacciones por los datos de ejemplo. ¿Continuar?');
+    if (!ok) return;
+    state.transactions = buildSeedData();
+    state.filters = { type: 'all', category: 'all' };
+    commit();
+    showToast('Datos de ejemplo restaurados.', { type: 'info' });
+  }
+
+  /* ======================================================================
+     14. EVENTOS
+     ====================================================================== */
+  function bindEvents() {
+    dom.form.addEventListener('submit', handleSubmit);
+
+    dom.form.addEventListener('change', (e) => {
+      if (e.target.name === 'type') syncFormWithType(e.target.value);
+    });
+
+    // Limpia el error de un campo en cuanto el usuario lo corrige
+    dom.form.addEventListener('input', (e) => {
+      const errorEl = dom.form.querySelector(`[data-error-for="${e.target.name}"]`);
+      if (errorEl && !errorEl.classList.contains('hidden')) {
+        errorEl.classList.add('hidden');
+        e.target.removeAttribute('aria-invalid');
+        e.target.classList.remove('ring-rose-500', 'dark:ring-rose-400');
+      }
+    });
+
+    // Delegación de eventos: un único listener para todos los botones "Eliminar"
+    dom.txList.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-action="delete"]');
+      if (btn) handleDelete(btn.dataset.id, btn.closest('.tx-row'));
+    });
+
+    dom.filterTypeButtons.forEach((btn) =>
+      btn.addEventListener('click', () => setFilters({ type: btn.dataset.filterType }))
+    );
+    dom.filterCategory.addEventListener('change', (e) => setFilters({ category: e.target.value }));
+    dom.clearFilters.addEventListener('click', () => setFilters({ type: 'all', category: 'all' }));
+
+    // Leyenda del gráfico: clic filtra, hover/focus resalta la porción
+    dom.chartLegend.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-legend-index]');
+      if (!btn) return;
+      const row = chartRows[Number(btn.dataset.legendIndex)];
+      if (row) toggleCategoryFromChart(row.category);
+    });
+    const legendHover = (e) => {
+      const btn = e.target.closest('[data-legend-index]');
+      highlightChartSlice(btn ? Number(btn.dataset.legendIndex) : null);
+    };
+    dom.chartLegend.addEventListener('mouseover', legendHover);
+    dom.chartLegend.addEventListener('focusin', legendHover);
+    dom.chartLegend.addEventListener('mouseleave', () => highlightChartSlice(null));
+    dom.chartLegend.addEventListener('focusout', () => highlightChartSlice(null));
+
+    dom.themeToggle.addEventListener('click', toggleTheme);
+    dom.resetDemo.addEventListener('click', resetDemoData);
+
+    // Si el usuario no eligió tema manualmente, seguimos al sistema operativo
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+      let saved = null;
+      try { saved = localStorage.getItem(CONFIG.THEME_KEY); } catch (err) { /* ignorar */ }
+      if (saved) return;
+      document.documentElement.classList.toggle('dark', e.matches);
+      renderChart();
+    });
+
+    // Sincroniza entre pestañas abiertas de la app
+    window.addEventListener('storage', (e) => {
+      if (e.key !== CONFIG.STORAGE_KEY) return;
+      state.transactions = Store.load() || [];
+      renderAll();
+    });
+  }
+
+  /* ======================================================================
+     15. INICIALIZACIÓN
+     ====================================================================== */
+  function init() {
+    populateCategorySelects();
+
+    // Valores iniciales del formulario
+    dom.form.elements.date.value = todayISO();
+    dom.categorySelect.value = DEFAULT_CATEGORY.expense;
+    syncFormWithType(getFormType());
+
+    // Carga datos guardados o, si no hay nada, los datos de ejemplo
+    const saved = Store.load();
+    if (saved === null) {
+      state.transactions = buildSeedData();
+      Store.save(state.transactions);
+    } else {
+      state.transactions = saved;
+    }
+
+    bindEvents();
+    renderAll();
+  }
+
+  init();
+  </script>
+</body>
+</html>
