@@ -59,6 +59,10 @@ export interface RecurringItem {
   /** Día del mes en que vence/se cobra (1-31; se ajusta a meses más cortos). */
   dayOfMonth: number
   active: boolean
+  /** Débito automático: se registra solo en su fecha (sin tocar "Pagar"). */
+  autoRegister?: boolean
+  /** Último mes ("YYYY-MM") registrado automáticamente: evita recrearlo si el usuario lo borra. */
+  lastAutoMonth?: MonthKey | null
 }
 
 export interface SavingsGoal {

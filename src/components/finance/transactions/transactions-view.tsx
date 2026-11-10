@@ -14,6 +14,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useCategoryMap, useMonthPlan } from "@/hooks/use-finance"
 import { financeActions } from "@/lib/finance/actions"
 import { budgetStatus, byDateDesc, transactionsInMonth } from "@/lib/finance/calculations"
+import { spendingSummary, usageProfile } from "@/lib/finance/insights"
 import { formatDate, formatMoney, formatMoneyPrecise, formatPercent } from "@/lib/finance/format"
 import type { FinanceState, MonthKey, Transaction, TransactionType } from "@/lib/finance/types"
 import { cn } from "@/lib/utils"
@@ -27,14 +28,17 @@ interface TransactionsViewProps {
   state: FinanceState
   month: MonthKey
   onAdd: () => void
+  onEdit: (transaction: Transaction) => void
 }
 
 type TypeFilter = "all" | TransactionType
 
 /** Movimientos reales del mes, contrastados contra lo planificado. */
-export function TransactionsView({ state, month, onAdd }: TransactionsViewProps) {
+export function TransactionsView({ state, month, onAdd, onEdit }: TransactionsViewProps) {
   const plan = useMonthPlan(state, month)
   const categoryMap = useCategoryMap(state)
+  const profile = useMemo(() => usageProfile(state, month), [state, month])
+  const summary = useMemo(() => spendingSummary(state, month), [state, month])
   const [query, setQuery] = useState("")
   const [type, setType] = useState<TypeFilter>("all")
   const [categoryId, setCategoryId] = useState("all")
@@ -69,21 +73,36 @@ export function TransactionsView({ state, month, onAdd }: TransactionsViewProps)
 
   return (
     <div className="space-y-6">
-      {/* Real vs. planificado */}
-      <section className="grid gap-4 sm:grid-cols-2" aria-label="Real contra planificado">
-        <PlanVsActual
-          title="Gastos reales vs. presupuesto"
-          actual={plan.expenses.actual}
-          planned={plan.budgets.totalLimit}
-          plannedLabel="presupuestado"
-          higherIsBad
-        />
-        <PlanVsActual
-          title="Ingresos reales vs. previstos"
-          actual={plan.income.actual}
-          planned={plan.income.expected}
-          plannedLabel="previsto"
-        />
+      {/* Resumen propio del registro; si hay plan, suma la comparación contra él. */}
+      <section className="grid gap-4 sm:grid-cols-2" aria-label="Resumen del mes">
+        {profile.hasLimits ? (
+          <PlanVsActual
+            title="Gastado vs. presupuesto"
+            actual={plan.expenses.actual}
+            planned={plan.budgets.totalLimit}
+            plannedLabel="presupuestado"
+            higherIsBad
+          />
+        ) : (
+          <SummaryCard title="Gastado este mes" value={formatMoney(summary.total)}>
+            {summary.change !== null
+              ? `${formatPercent(Math.abs(summary.change))} ${summary.change >= 0 ? "más" : "menos"} que el mes pasado a esta altura`
+              : "El mes que viene vas a poder compararte con este."}
+          </SummaryCard>
+        )}
+        {profile.hasIncome ? (
+          <PlanVsActual
+            title="Ingresos cobrados vs. previstos"
+            actual={plan.income.actual}
+            planned={plan.income.expected}
+            plannedLabel="previsto"
+          />
+        ) : (
+          <SummaryCard title="Promedio por día" value={formatMoney(summary.dailyAverage)}>
+            {summary.count} {summary.count === 1 ? "movimiento" : "movimientos"}
+            {summary.topCategoryId && ` · donde más gastás: ${categoryMap.get(summary.topCategoryId)?.name ?? ""}`}
+          </SummaryCard>
+        )}
       </section>
 
       <Card>
@@ -168,22 +187,29 @@ export function TransactionsView({ state, month, onAdd }: TransactionsViewProps)
                         const category = categoryMap.get(t.categoryId)
                         const income = t.type === "income"
                         return (
-                          <li key={t.id} className="group flex items-center gap-3 px-3 py-2.5">
-                            {category && <IconChip icon={category.icon} color={category.color} size="sm" />}
-                            <div className="min-w-0 flex-1">
-                              <p className="flex items-center gap-2 truncate text-sm font-medium">
-                                {t.description}
-                                {t.recurringId && (
-                                  <Badge variant="secondary" className="gap-1">
-                                    <Repeat aria-hidden="true" /> Fijo
-                                  </Badge>
-                                )}
+                          <li key={t.id} className="group flex items-center gap-1 pr-2">
+                            {/* Toda la fila abre la edición (botón real: accesible con teclado). */}
+                            <button
+                              type="button"
+                              onClick={() => onEdit(t)}
+                              className="flex min-w-0 flex-1 items-center gap-3 rounded-md px-3 py-2.5 text-left outline-none hover:bg-muted/60 focus-visible:ring-3 focus-visible:ring-ring/50"
+                            >
+                              {category && <IconChip icon={category.icon} color={category.color} size="sm" />}
+                              <div className="min-w-0 flex-1">
+                                <p className="flex items-center gap-2 truncate text-sm font-medium">
+                                  {t.description}
+                                  {t.recurringId && (
+                                    <Badge variant="secondary" className="gap-1">
+                                      <Repeat aria-hidden="true" /> Fijo
+                                    </Badge>
+                                  )}
+                                </p>
+                                <p className="truncate text-xs text-muted-foreground">{category?.name ?? "Sin categoría"}</p>
+                              </div>
+                              <p className={cn("text-sm font-semibold tabular-nums whitespace-nowrap", income && "text-good-ink")}>
+                                {income ? "+" : "−"} {formatMoneyPrecise(t.amount)}
                               </p>
-                              <p className="truncate text-xs text-muted-foreground">{category?.name ?? "Sin categoría"}</p>
-                            </div>
-                            <p className={cn("text-sm font-semibold tabular-nums whitespace-nowrap", income && "text-good-ink")}>
-                              {income ? "+" : "−"} {formatMoneyPrecise(t.amount)}
-                            </p>
+                            </button>
                             <Tooltip>
                               <TooltipTrigger asChild>
                                 <Button
@@ -242,6 +268,18 @@ function PlanVsActual({
           </span>
         </p>
         <Progress value={ratio * 100} className="h-2" indicatorClassName={fill} aria-label={title} />
+      </CardContent>
+    </Card>
+  )
+}
+
+function SummaryCard({ title, value, children }: { title: string; value: string; children: React.ReactNode }) {
+  return (
+    <Card className="gap-3 py-4">
+      <CardContent className="space-y-1 px-4">
+        <p className="text-sm text-muted-foreground">{title}</p>
+        <p className="text-xl font-semibold tabular-nums">{value}</p>
+        <p className="text-xs text-muted-foreground">{children}</p>
       </CardContent>
     </Card>
   )

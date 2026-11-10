@@ -3,7 +3,7 @@
  * a partir del estado. Sin React, sin efectos: fáciles de testear y reutilizar.
  */
 import { FINANCE_CONFIG } from "./config"
-import { currentMonthKey, dateInMonth, monthKeyOf, roundMoney, shiftMonth, todayISO } from "./format"
+import { currentMonthKey, dateInMonth, daysInMonth, monthKeyOf, roundMoney, shiftMonth, todayISO } from "./format"
 import type {
   BudgetStatus,
   Category,
@@ -59,10 +59,37 @@ export function recurringForMonth(state: FinanceState, month: MonthKey): Recurri
       if (transaction) return { item, date, transaction, status: "paid" }
       if (!item.active) return null
       if (isPast) return { item, date, status: "missed" }
+      if (item.autoRegister) {
+        // Ya se registró solo este mes y el usuario lo borró (ej. no se cobró): no se proyecta.
+        if (item.lastAutoMonth && item.lastAutoMonth >= month) return { item, date, status: "missed" }
+        // Si no, se va a registrar solo: nunca está "vencido".
+        return { item, date, status: "pending" }
+      }
       return { item, date, status: date < today ? "overdue" : "pending" }
     })
     .filter((o): o is RecurringOccurrence => o !== null)
     .sort((a, b) => a.date.localeCompare(b.date))
+}
+
+export interface DueAutoRegistration {
+  item: RecurringItem
+  date: ISODate
+  month: MonthKey
+  /** Id determinístico: dos dispositivos que lo registran a la vez crean LA MISMA fila. */
+  transactionId: string
+}
+
+/**
+ * Fijos automáticos que hoy ya deberían estar registrados (mes actual, fecha ≤ hoy)
+ * y todavía no lo están ni se registraron antes (lastAutoMonth).
+ */
+export function dueAutoRegistrations(state: FinanceState, today: ISODate = todayISO()): DueAutoRegistration[] {
+  const month = monthKeyOf(today)
+  const paid = new Set(transactionsInMonth(state, month).map((t) => t.recurringId).filter(Boolean))
+  return state.recurring
+    .filter((r) => r.active && r.autoRegister && !paid.has(r.id) && !(r.lastAutoMonth && r.lastAutoMonth >= month))
+    .map((item) => ({ item, month, date: dateInMonth(month, item.dayOfMonth), transactionId: `auto-${item.id}-${month}` }))
+    .filter((d) => d.date <= today)
 }
 
 /** Un fijo cuenta como "por pagar" (proyectado) si está pendiente o vencido. */
@@ -85,14 +112,26 @@ export interface CategoryBudget {
   remaining: number
   /** projected / limit (0 si no hay límite). */
   ratio: number
+  /** Parte de lo proyectado que corresponde a fijos (pagados o por pagar). */
+  fixedCommitted: number
   status: BudgetStatus
 }
 
-export function budgetStatus(projected: number, limit: number): BudgetStatus {
+/**
+ * Estado de un presupuesto.
+ *  - over:    lo proyectado supera el límite.
+ *  - warning: queda poco margen para gastos VARIABLES. Lo comprometido por fijos
+ *             (`fixedCommitted`) no cuenta: una categoría que es 100% alquiler está
+ *             siempre "llena" y eso no es una alerta (las alertas que siempre están
+ *             encendidas enseñan a ignorarlas).
+ */
+export function budgetStatus(projected: number, limit: number, fixedCommitted = 0): BudgetStatus {
   if (limit <= 0) return "unbudgeted"
-  const ratio = projected / limit
-  if (ratio > 1) return "over"
-  if (ratio >= FINANCE_CONFIG.warningThreshold) return "warning"
+  if (projected > limit) return "over"
+  const variableRoom = limit - fixedCommitted
+  if (variableRoom <= 0) return "ok" // todo el límite es de fijos y no se pasó
+  const variableUsed = projected - fixedCommitted
+  if (variableUsed / variableRoom >= FINANCE_CONFIG.warningThreshold) return "warning"
   return "ok"
 }
 
@@ -103,7 +142,9 @@ export function categoryBudgets(state: FinanceState, month: MonthKey): CategoryB
   return state.categories
     .filter((c) => c.kind === "expense")
     .map((category) => {
-      const spent = sum(monthTx.filter((t) => t.type === "expense" && t.categoryId === category.id).map((t) => t.amount))
+      const categoryTx = monthTx.filter((t) => t.type === "expense" && t.categoryId === category.id)
+      const spent = sum(categoryTx.map((t) => t.amount))
+      const fixedPaid = sum(categoryTx.filter((t) => t.recurringId).map((t) => t.amount))
       const pendingFixed = sum(pending.filter((o) => o.item.categoryId === category.id).map((o) => o.item.amount))
       const projected = roundMoney(spent + pendingFixed)
       const limit = category.monthlyLimit
@@ -115,7 +156,8 @@ export function categoryBudgets(state: FinanceState, month: MonthKey): CategoryB
         projected,
         remaining: roundMoney(limit - projected),
         ratio: limit > 0 ? projected / limit : 0,
-        status: budgetStatus(projected, limit),
+        fixedCommitted: roundMoney(fixedPaid + pendingFixed),
+        status: budgetStatus(projected, limit, fixedPaid + pendingFixed),
       }
     })
 }
@@ -273,5 +315,57 @@ export function monthPlan(state: FinanceState, month: MonthKey): MonthPlan {
     freeBalance: roundMoney(expected - projectedExpenses - reserved),
     unassigned: roundMoney(expected - projectedExpenses - remainingBudget - reserved),
     recurring,
+  }
+}
+
+/* ----------------------------------------------------------------------------
+ * Ritmo de gasto: "¿cuánto puedo gastar por día?"
+ * ------------------------------------------------------------------------- */
+
+export interface SpendingPace {
+  timing: MonthPlan["timing"]
+  /** Días que quedan en el mes, contando hoy (mes actual) o el mes entero (futuro). */
+  daysLeft: number
+  /** Monto diario sugerido, calculado al INICIO del día (no cambia con cada gasto de hoy). */
+  perDay: number
+  /** Gastos variables de hoy (sin fijos: esos ya estaban en el plan). */
+  spentToday: number
+  /** Lo que queda para hoy (negativo = hoy se gastó más que el diario). */
+  leftToday: number
+  /** Saldo libre del mes (ingresos previstos − gastos proyectados − ahorro). */
+  available: number
+  status: "ok" | "tight" | "over"
+}
+
+export function spendingPace(state: FinanceState, plan: MonthPlan, today: ISODate = todayISO()): SpendingPace {
+  const available = plan.freeBalance
+  const totalDays = daysInMonth(plan.month)
+
+  if (plan.timing === "past") {
+    return { timing: "past", daysLeft: 0, perDay: 0, spentToday: 0, leftToday: 0, available, status: available < 0 ? "over" : "ok" }
+  }
+
+  if (plan.timing === "future") {
+    const perDay = Math.max(0, available) / totalDays
+    return { timing: "future", daysLeft: totalDays, perDay, spentToday: 0, leftToday: perDay, available, status: available < 0 ? "over" : "ok" }
+  }
+
+  const day = Number(today.slice(8, 10))
+  const daysLeft = totalDays - day + 1
+  const spentToday = sum(
+    state.transactions.filter((t) => t.date === today && t.type === "expense" && !t.recurringId).map((t) => t.amount)
+  )
+  // Al inicio del día el saldo libre incluía lo que hoy se gastó.
+  const perDay = Math.max(0, available + spentToday) / daysLeft
+  const leftToday = roundMoney(perDay - spentToday)
+
+  return {
+    timing: "current",
+    daysLeft,
+    perDay: roundMoney(perDay),
+    spentToday,
+    leftToday,
+    available,
+    status: available < 0 ? "over" : leftToday < 0 ? "tight" : "ok",
   }
 }

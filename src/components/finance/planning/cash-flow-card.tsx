@@ -36,15 +36,15 @@ export function CashFlowCard({ plan }: { plan: MonthPlan }) {
     },
     {
       key: "budget",
-      label: "Presupuesto disponible",
-      description: "Lo que aún queda dentro de los límites de cada categoría",
+      label: "Queda en tus límites",
+      description: "Lo que aún podés gastar dentro del límite de cada categoría",
       value: plan.budgets.remainingBudget,
       color: "var(--cat-aqua)",
     },
     {
       key: "savings",
-      label: "Ahorro planificado",
-      description: "Aportes mensuales reservados para tus metas",
+      label: "Para tus metas",
+      description: "Lo que separás este mes para tus metas de ahorro",
       value: plan.savings.reserved,
       color: "var(--cat-violet)",
     },
@@ -58,9 +58,9 @@ export function CashFlowCard({ plan }: { plan: MonthPlan }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Flujo previsto del mes</CardTitle>
+        <CardTitle>¿A dónde va tu ingreso?</CardTitle>
         <CardDescription>
-          Cómo se reparte tu ingreso previsto de <strong className="text-foreground">{formatMoney(income)}</strong>
+          Así se reparten los <strong className="text-foreground">{formatMoney(income)}</strong> que entran este mes
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-5">
@@ -107,7 +107,7 @@ export function CashFlowCard({ plan }: { plan: MonthPlan }) {
           <div className="flex items-center gap-2.5 text-sm">
             <span aria-hidden="true" className="size-2.5 shrink-0 rounded-sm border border-foreground/25 bg-muted" />
             <dt className={cn("flex-1 truncate", overflow ? "text-bad-ink" : "text-muted-foreground")}>
-              {overflow ? "Excede tus ingresos" : "Sin asignar"}
+              {overflow ? "Te faltan" : "Sin destino"}
             </dt>
             <dd className={cn("font-medium tabular-nums", overflow && "text-bad-ink")}>
               {formatMoney(Math.abs(plan.unassigned))}

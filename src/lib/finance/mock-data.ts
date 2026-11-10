@@ -20,11 +20,11 @@ const CATEGORIES: Category[] = [
 ]
 
 const RECURRING: RecurringItem[] = [
-  { id: "r-sueldo", description: "Sueldo", amount: 980_000, type: "income", categoryId: "sueldo", dayOfMonth: 1, active: true },
-  { id: "r-gimnasio", description: "Gimnasio", amount: 25_000, type: "expense", categoryId: "salud", dayOfMonth: 3, active: true },
-  { id: "r-alquiler", description: "Alquiler", amount: 320_000, type: "expense", categoryId: "vivienda", dayOfMonth: 5, active: true },
-  { id: "r-internet", description: "Internet y TV", amount: 28_900, type: "expense", categoryId: "servicios", dayOfMonth: 10, active: true },
-  { id: "r-streaming", description: "Streaming", amount: 9_800, type: "expense", categoryId: "ocio", dayOfMonth: 12, active: true },
+  { id: "r-sueldo", description: "Sueldo", amount: 980_000, type: "income", categoryId: "sueldo", dayOfMonth: 1, active: true, autoRegister: true, lastAutoMonth: null },
+  { id: "r-gimnasio", description: "Gimnasio", amount: 25_000, type: "expense", categoryId: "salud", dayOfMonth: 3, active: true, autoRegister: true, lastAutoMonth: null },
+  { id: "r-alquiler", description: "Alquiler", amount: 320_000, type: "expense", categoryId: "vivienda", dayOfMonth: 5, active: true, autoRegister: true, lastAutoMonth: null },
+  { id: "r-internet", description: "Internet y TV", amount: 28_900, type: "expense", categoryId: "servicios", dayOfMonth: 10, active: true, autoRegister: true, lastAutoMonth: null },
+  { id: "r-streaming", description: "Streaming", amount: 9_800, type: "expense", categoryId: "ocio", dayOfMonth: 12, active: true, autoRegister: true, lastAutoMonth: null },
   { id: "r-luz-gas", description: "Luz y gas", amount: 35_000, type: "expense", categoryId: "servicios", dayOfMonth: 18, active: true },
 ]
 

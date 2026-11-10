@@ -80,11 +80,12 @@ export function financeReducer(state: FinanceState, action: FinanceAction): Fina
       return {
         ...state,
         goals: upsert(state.goals, action.goal),
-        goalMovements: [...state.goalMovements, ...action.movements],
+        goalMovements: action.movements.reduce(upsert, state.goalMovements),
       }
 
     case "goal/move":
-      return { ...state, goalMovements: [...state.goalMovements, action.movement] }
+      // upsert (no push): aplicar la misma acción dos veces no duplica el abono.
+      return { ...state, goalMovements: upsert(state.goalMovements, action.movement) }
 
     case "state/replace":
       return action.state

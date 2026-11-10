@@ -72,12 +72,12 @@ export function EmptyState({
  * Maneja apertura + ítem en edición + `key` para reiniciar el formulario en
  * cada apertura (sin vaciar el contenido durante la animación de cierre).
  */
-export function useDialogState<T>() {
-  const [state, setState] = useState<{ open: boolean; item: T | null; key: number }>({
-    open: false,
+export function useDialogState<T>(initialOpen: boolean | (() => boolean) = false) {
+  const [state, setState] = useState<{ open: boolean; item: T | null; key: number }>(() => ({
+    open: typeof initialOpen === "function" ? initialOpen() : initialOpen,
     item: null,
     key: 0,
-  })
+  }))
 
   const openWith = useCallback((item: T | null = null) => {
     setState((s) => ({ open: true, item, key: s.key + 1 }))

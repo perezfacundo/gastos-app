@@ -3,15 +3,20 @@
 import { useMemo, useSyncExternalStore } from "react"
 
 import { goalProgress, monthPlan } from "@/lib/finance/calculations"
-import { financeStore } from "@/lib/finance/store"
+import { financeStore, type FinanceMeta } from "@/lib/finance/store"
 import type { Category, FinanceState, MonthKey } from "@/lib/finance/types"
 
 /**
- * Estado financiero persistido. Devuelve `null` en el servidor y durante la
- * hidratación (localStorage no existe ahí); los componentes muestran un esqueleto.
+ * Estado financiero del usuario. Devuelve `null` mientras carga (y en el
+ * servidor); los componentes muestran un esqueleto.
  */
 export function useFinanceState(): FinanceState | null {
   return useSyncExternalStore(financeStore.subscribe, financeStore.getSnapshot, financeStore.getServerSnapshot)
+}
+
+/** Estado de carga/guardado: status, error, escrituras pendientes, datos locales importables. */
+export function useFinanceMeta(): FinanceMeta {
+  return useSyncExternalStore(financeStore.subscribe, financeStore.getMeta, financeStore.getServerMeta)
 }
 
 /** Plan derivado del mes (memoizado: solo se recalcula si cambian estado o mes). */

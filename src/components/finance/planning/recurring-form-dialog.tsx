@@ -55,6 +55,8 @@ function RecurringForm({ state, item, onDone }: { state: FinanceState; item: Rec
   const [categoryId, setCategoryId] = useState(item?.categoryId ?? firstOf("expense"))
   const [day, setDay] = useState(item ? String(item.dayOfMonth) : "1")
   const [active, setActive] = useState(item?.active ?? true)
+  // Nuevos fijos: automáticos por defecto (la mayoría son débitos automáticos).
+  const [autoRegister, setAutoRegister] = useState(item?.autoRegister ?? true)
   const [errors, setErrors] = useState<Errors>({})
 
   function handleSubmit(event: React.FormEvent) {
@@ -70,7 +72,17 @@ function RecurringForm({ state, item, onDone }: { state: FinanceState; item: Rec
     if (Object.keys(found).length) return
 
     financeActions.saveRecurring(
-      { description, amount: numericAmount, type, categoryId, dayOfMonth: numericDay, active },
+      {
+        description,
+        amount: numericAmount,
+        type,
+        categoryId,
+        dayOfMonth: numericDay,
+        active,
+        autoRegister,
+        // Se conserva: si se perdiera, un movimiento automático borrado volvería a aparecer.
+        lastAutoMonth: item?.lastAutoMonth ?? null,
+      },
       item?.id
     )
     toast.success(item ? "Fijo actualizado" : "Fijo agregado", { description: description.trim() })
@@ -122,6 +134,17 @@ function RecurringForm({ state, item, onDone }: { state: FinanceState; item: Rec
           />
         )}
       </Field>
+
+      <div className="flex items-center justify-between gap-4 rounded-lg border px-3 py-2.5">
+        <div>
+          <Label htmlFor="recurring-auto">Registrar automáticamente</Label>
+          <p className="text-xs text-muted-foreground">
+            Para débitos automáticos: se anota solo el día {Number(day) || "—"} de cada mes. Desactivalo si el monto varía y
+            preferís confirmarlo vos.
+          </p>
+        </div>
+        <Switch id="recurring-auto" checked={autoRegister} onCheckedChange={setAutoRegister} />
+      </div>
 
       <div className="flex items-center justify-between gap-4 rounded-lg border px-3 py-2.5">
         <div>

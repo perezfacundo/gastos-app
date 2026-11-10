@@ -1,9 +1,9 @@
-import { FinanceApp } from "@/components/finance/finance-app"
+import { ProtectedApp } from "@/components/finance/protected-app"
 
 /**
- * Página única (Server Component). Toda la interactividad vive en <FinanceApp />,
- * un Client Component, porque depende de localStorage.
+ * Página principal (Server Component). Requiere sesión: <ProtectedApp />
+ * redirige a /login si no hay usuario y, si lo hay, carga sus datos.
  */
 export default function Home() {
-  return <FinanceApp />
+  return <ProtectedApp />
 }

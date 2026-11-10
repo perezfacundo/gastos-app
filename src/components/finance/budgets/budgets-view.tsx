@@ -23,16 +23,14 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { Progress } from "@/components/ui/progress"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { useMonthPlan } from "@/hooks/use-finance"
 import { financeActions } from "@/lib/finance/actions"
 import { averageMonthlySpend, type CategoryBudget } from "@/lib/finance/calculations"
-import { formatMoney, formatMonthLabel, formatPercent } from "@/lib/finance/format"
-import type { BudgetStatus, Category, FinanceState, MonthKey } from "@/lib/finance/types"
-import { cn } from "@/lib/utils"
+import { formatMoney } from "@/lib/finance/format"
+import type { Category, FinanceState, MonthKey } from "@/lib/finance/types"
 
-import { BudgetBar, STATUS_META, StatusBadge } from "../shared/budget-status"
+import { BudgetBar, StatusBadge } from "../shared/budget-status"
 import { IconChip } from "../shared/category-icon"
 import { MoneyInput, parseAmount } from "../shared/form-fields"
 import { useDialogState } from "../shared/misc"
@@ -64,18 +62,12 @@ export function BudgetsView({ state, month }: BudgetsViewProps) {
 
   return (
     <div className="space-y-6">
-      <AllocationCard
-        income={plan.income.expected}
-        budgeted={plan.budgets.totalLimit}
-        savings={plan.savings.planned}
-        month={month}
-      />
-
       <Card>
         <CardHeader>
           <CardTitle>Límites de gasto mensual</CardTitle>
           <CardDescription>
-            Ajustá cada tope tomando como referencia tu promedio de los últimos 3 meses. Se guarda al salir del campo.
+            Opcionales. Si anotás tus gastos, te mostramos tu promedio de los últimos 3 meses y te sugerimos un tope (✨).
+            Se guarda al salir del campo.
           </CardDescription>
           <CardAction>
             <Button size="sm" onClick={() => dialog.openWith(null)}>
@@ -147,71 +139,6 @@ export function BudgetsView({ state, month }: BudgetsViewProps) {
 }
 
 /* ----------------------------------------------------------------------------
- * Resumen de asignación (presupuesto base cero)
- * ------------------------------------------------------------------------- */
-
-function AllocationCard({
-  income,
-  budgeted,
-  savings,
-  month,
-}: {
-  income: number
-  budgeted: number
-  savings: number
-  month: MonthKey
-}) {
-  const assigned = budgeted + savings
-  const free = income - assigned
-  // En presupuesto base cero, asignar cerca del 100% es lo deseable: solo alerta al pasarse.
-  const status: BudgetStatus = income <= 0 ? "unbudgeted" : assigned > income ? "over" : "ok"
-  const meta = STATUS_META[status]
-  const badgeLabel = status === "over" ? "Supera ingresos" : status === "ok" ? "Plan equilibrado" : "Sin ingresos previstos"
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Asignación de {formatMonthLabel(month).toLowerCase()}</CardTitle>
-        <CardDescription>Cada peso de tu ingreso previsto debería tener un destino.</CardDescription>
-        <CardAction>
-          <StatusBadge status={status} label={badgeLabel} />
-        </CardAction>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          <Figure label="Ingreso previsto" value={formatMoney(income)} />
-          <Figure label="En límites" value={formatMoney(budgeted)} />
-          <Figure label="A metas de ahorro" value={formatMoney(savings)} />
-          <Figure
-            label={free >= 0 ? "Sin asignar" : "Asignado de más"}
-            value={formatMoney(Math.abs(free))}
-            className={free < 0 ? "text-bad-ink" : undefined}
-          />
-        </div>
-        <Progress
-          value={income > 0 ? (assigned / income) * 100 : 0}
-          className="h-2.5"
-          indicatorClassName={meta.fill}
-          aria-label="Porcentaje del ingreso asignado"
-        />
-        <p className="text-xs text-muted-foreground">
-          Asignaste el {formatPercent(income > 0 ? assigned / income : 0)} de tu ingreso previsto.
-        </p>
-      </CardContent>
-    </Card>
-  )
-}
-
-function Figure({ label, value, className }: { label: string; value: string; className?: string }) {
-  return (
-    <div>
-      <p className="text-xs text-muted-foreground">{label}</p>
-      <p className={cn("text-lg font-semibold tabular-nums", className)}>{value}</p>
-    </div>
-  )
-}
-
-/* ----------------------------------------------------------------------------
  * Fila editable de límite
  * ------------------------------------------------------------------------- */
 
@@ -255,7 +182,9 @@ function CategoryLimitRow({
               {category.system && <Lock className="size-3 text-muted-foreground" aria-label="Categoría del sistema" />}
             </p>
             <p className="text-xs text-muted-foreground tabular-nums">
-              Este mes {formatMoney(projected)} · Promedio {formatMoney(average)}
+              Este mes {formatMoney(projected)}
+              {/* El promedio solo aporta si la persona anota sus gastos (complemento del registro). */}
+              {average > 0 && <> · Promedio {formatMoney(average)}</>}
             </p>
           </div>
           <StatusBadge status={status} className="hidden md:inline-flex" />

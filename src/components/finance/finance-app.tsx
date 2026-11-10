@@ -4,94 +4,185 @@ import {
   ArrowLeftRight,
   ChevronLeft,
   ChevronRight,
-  Database,
-  Eraser,
-  LayoutDashboard,
+  CloudOff,
+  House,
   Moon,
   Plus,
-  RotateCcw,
   SlidersHorizontal,
   Sun,
   Target,
   Wallet,
 } from "lucide-react"
 import { useTheme } from "next-themes"
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { toast } from "sonner"
 
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog"
+import { InstallHint } from "@/components/pwa/install-hint"
 import { Button } from "@/components/ui/button"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { useFinanceState } from "@/hooks/use-finance"
-import { financeActions } from "@/lib/finance/actions"
+import { useFinanceMeta, useFinanceState } from "@/hooks/use-finance"
 import { currentMonthKey, dateInMonth, formatMonthLabel, shiftMonth, todayISO } from "@/lib/finance/format"
-import type { FinanceState, MonthKey } from "@/lib/finance/types"
+import { financeActions } from "@/lib/finance/actions"
+import { hasUserData } from "@/lib/finance/legacy"
+import { financeStore } from "@/lib/finance/store"
+import type { FinanceState, MonthKey, Transaction } from "@/lib/finance/types"
+import { readPref, writePref } from "@/lib/preferences"
 
-import { BudgetsView } from "./budgets/budgets-view"
+import { AccountMenu } from "./account-menu"
 import { GoalsView } from "./goals/goals-view"
-import { PlanningView } from "./planning/planning-view"
+import { OnboardingWizard } from "./onboarding/onboarding-wizard"
+import { HomeView } from "./home/home-view"
+import { PlanView } from "./planning/plan-view"
 import { useDialogState } from "./shared/misc"
+import { SyncIndicator } from "./sync-indicator"
 import { TransactionFormDialog } from "./transactions/transaction-form-dialog"
 import { TransactionsView } from "./transactions/transactions-view"
-
-const TABS = [
-  { value: "plan", label: "Planificación", icon: LayoutDashboard },
-  { value: "budgets", label: "Límites", icon: SlidersHorizontal },
-  { value: "goals", label: "Metas", icon: Target },
-  { value: "transactions", label: "Movimientos", icon: ArrowLeftRight },
-] as const
-
-type TabValue = (typeof TABS)[number]["value"]
+import { LegacyImportBanner } from "./welcome-panel"
 
 /**
- * Punto de entrada. En el servidor (y durante la hidratación) no hay
- * localStorage: se muestra el esqueleto. Las fechas ("hoy", mes actual) solo
- * se calculan en el cliente, dentro de <PlannerApp />.
+ * Navegación por módulos: "Movimientos" (registro) y "Plan" (presupuesto) funcionan
+ * solos; "Inicio" combina lo que la persona usa.
  */
-export function FinanceApp() {
+const TABS = [
+  { value: "home", label: "Inicio", icon: House },
+  { value: "transactions", label: "Movimientos", icon: ArrowLeftRight },
+  { value: "plan", label: "Plan", icon: SlidersHorizontal },
+  { value: "goals", label: "Metas", icon: Target },
+] as const
+
+export type TabValue = (typeof TABS)[number]["value"]
+
+export interface AppUser {
+  id: string
+  email: string
+}
+
+/**
+ * App de un usuario logueado: carga sus datos desde Supabase y muestra la UI.
+ * Las fechas ("hoy", mes actual) solo se calculan en el cliente, dentro de
+ * <PlannerApp />, que se monta cuando el estado ya está cargado.
+ */
+export function FinanceApp({ user }: { user: AppUser }) {
   const state = useFinanceState()
+  const meta = useFinanceMeta()
+
+  // Cargar los datos del usuario (y recargarlos si cambia de cuenta).
+  useEffect(() => {
+    void financeStore.load(user.id)
+  }, [user.id])
+
+  // Errores de guardado → toast. El store recarga solo el estado del servidor.
+  useEffect(() => {
+    financeStore.setErrorHandler((message) =>
+      toast.error("No se pudo guardar el cambio", {
+        description: `${message}. Se restauraron los datos del servidor.`,
+      })
+    )
+    return () => financeStore.setErrorHandler(null)
+  }, [])
+
+  if (meta.status === "error") {
+    return (
+      <AppFrame user={user}>
+        <LoadError message={meta.error} onRetry={() => void financeStore.load(user.id, { force: true })} />
+      </AppFrame>
+    )
+  }
   if (!state) {
     return (
-      <AppFrame>
+      <AppFrame user={user}>
         <AppSkeleton />
       </AppFrame>
     )
   }
-  return <PlannerApp state={state} />
+  return <PlannerApp state={state} user={user} />
 }
 
 /** App ya cargada: selector de mes, pestañas y diálogo global de movimientos. */
-function PlannerApp({ state }: { state: FinanceState }) {
+function PlannerApp({ state, user }: { state: FinanceState; user: AppUser }) {
   const [month, setMonth] = useState<MonthKey>(currentMonthKey)
-  const [tab, setTab] = useState<TabValue>("plan")
-  const txDialog = useDialogState<null>()
+  const [tab, setTab] = useState<TabValue>("home")
+  // Acceso directo del ícono instalado ("/?nuevo=1"): abre directo el formulario.
+  const txDialog = useDialogState<Transaction>(() => new URLSearchParams(window.location.search).has("nuevo"))
+  const openNewTransaction = txDialog.openWith
+
+  // Limpia "?nuevo=1" de la URL para que recargar no vuelva a abrir el diálogo.
+  useEffect(() => {
+    if (window.location.search.includes("nuevo")) window.history.replaceState(null, "", "/")
+  }, [])
 
   // Fecha sugerida para un movimiento nuevo: hoy si se mira el mes actual.
   const defaultDate = month === currentMonthKey() ? todayISO() : dateInMonth(month, 1)
 
+  // Atajo de teclado: "n" abre "Nuevo movimiento" (si no se está escribiendo en un campo).
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      const target = event.target instanceof Element ? event.target : null
+      const typing = target?.closest("input, textarea, select, [contenteditable=true], [role=dialog]")
+      if (event.key === "n" && !event.metaKey && !event.ctrlKey && !event.altKey && !typing) {
+        event.preventDefault()
+        openNewTransaction(null)
+      }
+    }
+    window.addEventListener("keydown", onKeyDown)
+    return () => window.removeEventListener("keydown", onKeyDown)
+  }, [openNewTransaction])
+
+  // Fijos automáticos: se registran solos cuando vence su fecha. Se espera a tener
+  // datos frescos del servidor (no solo la copia local) para no recrear algo que
+  // el usuario borró desde otro dispositivo.
+  const { legacy, synced } = useFinanceMeta()
+  useEffect(() => {
+    if (!synced) return
+    const registered = financeActions.autoRegisterDue(state)
+    if (registered > 0) {
+      toast(`Registramos ${registered === 1 ? "1 fijo automático" : `${registered} fijos automáticos`} de este mes`, {
+        description: "Si alguno no se cobró, podés borrarlo o editarlo en Movimientos.",
+      })
+    }
+  }, [state, synced])
+
+  // Asistente: se ofrece en cuentas nuevas y se puede abrir después para armar el plan.
+  const skipKey = `onboarding-skipped:${user.id}`
+  const [wizard, setWizard] = useState<"new" | "plan" | null>(() =>
+    !hasUserData(state) && !legacy && !readPref(skipKey, false) ? "new" : null
+  )
+
+  if (wizard) {
+    return (
+      <AppFrame user={user}>
+        <OnboardingWizard
+          state={state}
+          mode={wizard}
+          onClose={() => {
+            if (wizard === "new") writePref(skipKey, true)
+            setWizard(null)
+          }}
+          onChooseTracking={() => txDialog.openWith(null)}
+        />
+      </AppFrame>
+    )
+  }
+
+  async function loadSample() {
+    try {
+      await financeActions.resetToSample()
+      toast.success("Datos de ejemplo cargados", { description: "Podés borrarlos desde el menú de tu cuenta." })
+    } catch {
+      /* el store ya avisó */
+    }
+  }
+
   return (
     <AppFrame
+      user={user}
       monthSwitcher={<MonthSwitcher month={month} onChange={setMonth} />}
       onAddTransaction={() => txDialog.openWith(null)}
     >
+      <InstallHint enabled={state.transactions.length >= 3} />
+      <LegacyImportBanner />
+
       <Tabs value={tab} onValueChange={(v) => setTab(v as TabValue)} className="gap-6">
         <TabsList className="w-full sm:w-fit" aria-label="Secciones">
           {TABS.map(({ value, label, icon: Icon }) => (
@@ -103,17 +194,31 @@ function PlannerApp({ state }: { state: FinanceState }) {
           ))}
         </TabsList>
 
-        <TabsContent value="plan">
-          <PlanningView state={state} month={month} onEditLimits={() => setTab("budgets")} />
+        <TabsContent value="home">
+          <HomeView
+            state={state}
+            month={month}
+            onGoToPlan={() => setTab("plan")}
+            onSeeAllTransactions={() => setTab("transactions")}
+            onAddTransaction={() => txDialog.openWith(null)}
+            onEditTransaction={(tx) => txDialog.openWith(tx)}
+            onOpenWizard={() => setWizard("plan")}
+            onLoadSample={loadSample}
+          />
         </TabsContent>
-        <TabsContent value="budgets">
-          <BudgetsView state={state} month={month} />
+        <TabsContent value="transactions">
+          <TransactionsView
+            state={state}
+            month={month}
+            onAdd={() => txDialog.openWith(null)}
+            onEdit={(tx) => txDialog.openWith(tx)}
+          />
+        </TabsContent>
+        <TabsContent value="plan">
+          <PlanView state={state} month={month} onOpenWizard={() => setWizard("plan")} />
         </TabsContent>
         <TabsContent value="goals">
           <GoalsView state={state} />
-        </TabsContent>
-        <TabsContent value="transactions">
-          <TransactionsView state={state} month={month} onAdd={() => txDialog.openWith(null)} />
         </TabsContent>
       </Tabs>
 
@@ -123,18 +228,31 @@ function PlannerApp({ state }: { state: FinanceState }) {
         formKey={txDialog.key}
         state={state}
         defaultDate={defaultDate}
+        transaction={txDialog.item}
       />
+
+      {/* Botón flotante en el celular: cargar un gasto está siempre a un toque. */}
+      <Button
+        size="icon-lg"
+        className="fixed right-4 bottom-[calc(1rem+env(safe-area-inset-bottom))] z-40 size-14 rounded-full shadow-lg sm:hidden [&_svg:not([class*='size-'])]:size-6"
+        aria-label="Nuevo movimiento"
+        onClick={() => txDialog.openWith(null)}
+      >
+        <Plus />
+      </Button>
     </AppFrame>
   )
 }
 
-/** Marco común (encabezado + contenedor) para el esqueleto y la app cargada. */
-function AppFrame({
+/** Marco común (encabezado + contenedor). `user` es opcional para el esqueleto previo al login. */
+export function AppFrame({
   children,
+  user,
   monthSwitcher,
   onAddTransaction,
 }: {
   children: React.ReactNode
+  user?: AppUser
   monthSwitcher?: React.ReactNode
   onAddTransaction?: () => void
 }) {
@@ -153,48 +271,50 @@ function AppFrame({
           </div>
 
           <div className="ml-auto flex items-center gap-1.5 sm:order-3 sm:ml-0">
-            <Button size="sm" onClick={onAddTransaction} disabled={!onAddTransaction}>
-              <Plus data-icon="inline-start" />
-              <span className="hidden sm:inline">Movimiento</span>
-              <span className="sr-only sm:hidden">Nuevo movimiento</span>
-            </Button>
+            {user && <SyncIndicator />}
+            {onAddTransaction && (
+              <Button size="sm" className="hidden sm:inline-flex" onClick={onAddTransaction}>
+                <Plus data-icon="inline-start" />
+                Movimiento
+                <kbd className="ml-1 hidden rounded border border-primary-foreground/30 px-1 text-[10px] leading-4 opacity-70 lg:inline">N</kbd>
+              </Button>
+            )}
             <ThemeToggle />
-            <DataMenu />
+            {user && <AccountMenu user={user} />}
           </div>
 
           <div className="order-last w-full sm:order-2 sm:mx-auto sm:w-auto">{monthSwitcher}</div>
         </div>
       </header>
 
-      <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6">{children}</main>
+      {/* pb extra en el celular: el botón flotante no tapa el último contenido. */}
+      <main className="mx-auto w-full max-w-6xl flex-1 space-y-6 px-4 pt-6 pb-24 sm:pb-6">{children}</main>
     </div>
   )
 }
 
 /* ----------------------------------------------------------------------------
- * Piezas del encabezado
+ * Piezas del encabezado y estados
  * ------------------------------------------------------------------------- */
 
 function MonthSwitcher({ month, onChange }: { month: MonthKey; onChange: (m: MonthKey) => void }) {
   const current = currentMonthKey()
   return (
-    <div>
-      <div className="flex items-center justify-between gap-1 sm:justify-center">
-        <Button size="icon-sm" variant="ghost" aria-label="Mes anterior" onClick={() => onChange(shiftMonth(month, -1))}>
-          <ChevronLeft />
+    <div className="flex items-center justify-between gap-1 sm:justify-center">
+      <Button size="icon-sm" variant="ghost" aria-label="Mes anterior" onClick={() => onChange(shiftMonth(month, -1))}>
+        <ChevronLeft />
+      </Button>
+      <p className="min-w-36 text-center text-sm font-medium" aria-live="polite">
+        {formatMonthLabel(month)}
+      </p>
+      <Button size="icon-sm" variant="ghost" aria-label="Mes siguiente" onClick={() => onChange(shiftMonth(month, 1))}>
+        <ChevronRight />
+      </Button>
+      {month !== current && (
+        <Button size="xs" variant="outline" onClick={() => onChange(current)}>
+          Hoy
         </Button>
-        <p className="min-w-36 text-center text-sm font-medium" aria-live="polite">
-          {formatMonthLabel(month)}
-        </p>
-        <Button size="icon-sm" variant="ghost" aria-label="Mes siguiente" onClick={() => onChange(shiftMonth(month, 1))}>
-          <ChevronRight />
-        </Button>
-        {month !== current && (
-          <Button size="xs" variant="outline" onClick={() => onChange(current)}>
-            Hoy
-          </Button>
-        )}
-      </div>
+      )}
     </div>
   )
 }
@@ -215,77 +335,23 @@ function ThemeToggle() {
   )
 }
 
-function DataMenu() {
-  const [confirm, setConfirm] = useState<"sample" | "clear" | null>(null)
-
-  const copy = {
-    sample: {
-      title: "¿Restaurar datos de ejemplo?",
-      description: "Se reemplazarán todos tus datos por el ejemplo inicial.",
-      action: "Restaurar",
-      run: () => {
-        financeActions.resetToSample()
-        toast.success("Datos de ejemplo restaurados")
-      },
-    },
-    clear: {
-      title: "¿Empezar de cero?",
-      description: "Se borrarán movimientos, fijos y metas. Las categorías se conservan sin límites.",
-      action: "Borrar todo",
-      run: () => {
-        financeActions.clearAll()
-        toast.success("Listo: empezás con un plan en blanco")
-      },
-    },
-  } as const
-
-  const current = confirm ? copy[confirm] : null
-
+function LoadError({ message, onRetry }: { message: string | null; onRetry: () => void }) {
   return (
-    <>
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button size="icon-sm" variant="ghost" aria-label="Opciones de datos">
-            <Database />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
-          <DropdownMenuLabel>Datos (guardados en este navegador)</DropdownMenuLabel>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={() => setConfirm("sample")}>
-            <RotateCcw /> Restaurar datos de ejemplo
-          </DropdownMenuItem>
-          <DropdownMenuItem variant="destructive" onSelect={() => setConfirm("clear")}>
-            <Eraser /> Empezar de cero
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-
-      <AlertDialog open={confirm !== null} onOpenChange={(open) => !open && setConfirm(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{current?.title}</AlertDialogTitle>
-            <AlertDialogDescription>{current?.description}</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancelar</AlertDialogCancel>
-            <AlertDialogAction
-              variant={confirm === "clear" ? "destructive" : "default"}
-              onClick={() => {
-                current?.run()
-                setConfirm(null)
-              }}
-            >
-              {current?.action}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </>
+    <div className="mx-auto flex max-w-md flex-col items-center gap-3 rounded-xl border bg-card px-6 py-12 text-center">
+      <span className="grid size-12 place-items-center rounded-full bg-muted text-muted-foreground">
+        <CloudOff className="size-6" aria-hidden="true" />
+      </span>
+      <p className="font-medium">No pudimos cargar tus datos</p>
+      <p className="text-sm text-muted-foreground">
+        Revisá tu conexión e intentá de nuevo.
+        {message && <span className="mt-1 block text-xs">Detalle: {message}</span>}
+      </p>
+      <Button onClick={onRetry}>Reintentar</Button>
+    </div>
   )
 }
 
-function AppSkeleton() {
+export function AppSkeleton() {
   return (
     <div className="space-y-6" aria-busy="true" aria-label="Cargando">
       <Skeleton className="h-9 w-96 max-w-full" />
